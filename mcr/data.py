@@ -28,10 +28,6 @@ class Dataset:
     x_holdout: np.ndarray
     y_holdout: np.ndarray
 
-    @property
-    def n_features(self) -> int:
-        return int(self.x_train.shape[1])
-
 
 def _log_odds_weights(rng: np.random.Generator, n_features: int) -> np.ndarray:
     """A few features carry signal and the rest are noise.

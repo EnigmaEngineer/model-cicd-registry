@@ -1,0 +1,16 @@
+# The incumbent. The promotion gate compares candidates against whatever this produces.
+name: baseline
+seed: 20260911
+
+data:
+  n_rows: 20000
+  n_features: 12
+  positive_rate: 0.18
+  noise: 0.9
+  holdout_frac: 0.25
+
+model:
+  learning_rate: 0.5
+  epochs: 400
+  l2: 0.001
+  init: zeros

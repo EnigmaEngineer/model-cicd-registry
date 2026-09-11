@@ -1,0 +1,4 @@
+# Everything imported by mcr/, tests/ and scripts/. tests/test_deps.py walks the tree and
+# fails if this file and the imports disagree, in either direction.
+numpy==2.2.6
+PyYAML==6.0.3

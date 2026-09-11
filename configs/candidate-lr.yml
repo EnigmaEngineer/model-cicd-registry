@@ -1,0 +1,17 @@
+# Same data, faster steps. First thing anybody tries and a useful gate case, because it
+# trains on an identical corpus so any metric difference is the optimiser and nothing else.
+name: candidate-lr
+seed: 20260911
+
+data:
+  n_rows: 20000
+  n_features: 12
+  positive_rate: 0.18
+  noise: 0.9
+  holdout_frac: 0.25
+
+model:
+  learning_rate: 1.5
+  epochs: 400
+  l2: 0.001
+  init: zeros

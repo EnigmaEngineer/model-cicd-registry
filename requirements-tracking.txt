@@ -1,0 +1,8 @@
+# Needed by mcr/tracking.py, scripts/track_probe.py and tests/test_tracking.py only. The
+# training pipeline in mcr/ does not import it, so a clone that only wants to train a model
+# installs requirements.txt and stops.
+#
+# Unpinned deliberately. The behaviour this layer relies on was measured on 3.16.0 and the
+# numbers are in docs/adr-0002, but pinning a version I have only ever run on one machine
+# invents provenance I do not have.
+mlflow

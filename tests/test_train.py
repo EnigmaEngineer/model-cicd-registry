@@ -64,8 +64,8 @@ def check_the_baseline_artefact_hash_is_the_pinned_one():
 
     Every other reproducibility check runs the pipeline twice and compares the two
     results. All of them pass against a pipeline that computes the wrong thing
-    consistently. A mutant flipping the sign of the noise term, from `centred @ w + noise`
-    to `- noise`, changes every row of the corpus and every byte of the artefact, and the
+    consistently. A mutant flipped the sign of the noise term, from `centred @ w + noise`
+    to `- noise`. That changes every row of the corpus and every byte of the artefact. The
     whole suite stayed green. The noise is symmetric, so nothing distributional moves.
 
     The consequence is not cosmetic. Every model ever stored under the old corpus becomes

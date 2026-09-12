@@ -1,8 +1,8 @@
 """Artefact checks.
 
-The registry keys on the content hash, so a hash that moves when nothing
-meaningful changed, or holds still when something did, breaks the project rather than one
-function.
+The registry keys on the content hash. A hash that moves when nothing meaningful changed
+breaks the project rather than one function. So does one that holds still when something
+real did change.
 """
 
 from __future__ import annotations

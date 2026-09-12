@@ -15,7 +15,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, get_type_hints
 
 import yaml
 
@@ -68,6 +68,73 @@ def _require(mapping: Dict[str, Any], key: str, where: str) -> Any:
     return mapping[key]
 
 
+def declared_types(cls) -> Dict[str, type]:
+    """Field name to real type for one config section.
+
+    `dataclasses.fields(cls)[i].type` is the *string* "int" in this module, because of the
+    `from __future__ import annotations` at the top. Calling it would call a string. So the
+    types come from `get_type_hints`, which resolves them against the module namespace.
+    """
+    hints = get_type_hints(cls)
+    return {f.name: hints[f.name] for f in fields(cls)}
+
+
+def coerce(value: Any, want: type, where: str) -> Any:
+    """Convert to the declared type, or refuse. Never convert with loss.
+
+    This exists because the fingerprint was a function of how the YAML was typed rather
+    than of the run. `noise: 1` and `noise: 1.0` describe the same training run and
+    fingerprinted differently, because the dataclass stored whatever `yaml.safe_load`
+    handed it and `json.dumps` then wrote `1` against `1.0`. Two spellings of one recipe
+    got two registry keys. See docs/adr-0002.
+
+    It also has to accept strings, because that is what the tracking store gives back. A
+    param goes into MLflow as a float and comes out as "0.5", so the recovery path needs
+    the same rule the loader uses. One function rather than two that drift apart.
+    """
+    if want is bool:
+        raise ConfigError("{}: bool is not a config type".format(where))
+
+    if want is str:
+        # Deliberately not str(value). `name: 2026` is more likely a mistake than an
+        # intent, and a silent stringify is how a typo survives to the registry.
+        if not isinstance(value, str):
+            raise ConfigError(
+                "{} must be a string, got {}".format(where, type(value).__name__)
+            )
+        return value
+
+    # bool before int, because bool is a subclass of int and `epochs: true` would pass.
+    if isinstance(value, bool):
+        raise ConfigError("{}: bool is not a number".format(where))
+
+    if want is int:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if value != int(value):
+                raise ConfigError("{} must be a whole number, got {}".format(where, value))
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return coerce(float(value), int, where)
+            except ValueError:
+                raise ConfigError("{} is not a number: {!r}".format(where, value))
+        raise ConfigError("{} must be a number, got {}".format(where, type(value).__name__))
+
+    if want is float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                raise ConfigError("{} is not a number: {!r}".format(where, value))
+        raise ConfigError("{} must be a number, got {}".format(where, type(value).__name__))
+
+    raise ConfigError("{}: no rule for declared type {}".format(where, want))
+
+
 def _section(raw: Dict[str, Any], key: str, cls) -> Any:
     """Build a section and refuse anything the dataclass does not declare.
 
@@ -78,14 +145,18 @@ def _section(raw: Dict[str, Any], key: str, cls) -> Any:
     body = _require(raw, key, "config")
     if not isinstance(body, dict):
         raise ConfigError("config section '{}' must be a mapping".format(key))
-    declared = {f.name for f in fields(cls)}
-    unknown = sorted(set(body) - declared)
+    declared = declared_types(cls)
+    unknown = sorted(set(body) - set(declared))
     if unknown:
         raise ConfigError("unknown keys in '{}': {}".format(key, ", ".join(unknown)))
-    missing = sorted(declared - set(body))
+    missing = sorted(set(declared) - set(body))
     if missing:
         raise ConfigError("'{}' is missing: {}".format(key, ", ".join(missing)))
-    return cls(**body)
+    typed = {
+        name: coerce(body[name], want, "{}.{}".format(key, name))
+        for name, want in declared.items()
+    }
+    return cls(**typed)
 
 
 def validate(cfg: TrainConfig) -> None:
@@ -136,8 +207,8 @@ def from_dict(raw: Dict[str, Any]) -> TrainConfig:
         raise ConfigError("unknown top level keys: {}".format(", ".join(unknown)))
 
     cfg = TrainConfig(
-        name=_require(raw, "name", "config"),
-        seed=_require(raw, "seed", "config"),
+        name=coerce(_require(raw, "name", "config"), str, "name"),
+        seed=coerce(_require(raw, "seed", "config"), int, "seed"),
         data=_section(raw, "data", DataConfig),
         model=_section(raw, "model", ModelConfig),
     )

@@ -59,6 +59,78 @@ def check_fingerprint_is_stable_across_calls():
     assert a == b, "{} != {}".format(a, b)
 
 
+def check_the_fingerprint_is_a_function_of_the_run_and_not_of_the_yaml():
+    """The defect docs/adr-0002 is about.
+
+    `noise: 1` and `noise: 1.0` are the same training run. Before the loader coerced its
+    own declared types they fingerprinted differently, because the dataclass stored
+    whatever yaml handed it and json.dumps wrote `1` against `1.0`. That put two registry
+    keys on one model.
+
+    Every pair below is one run written two ways. Integral floats into int fields are the
+    same case from the other side.
+    """
+    pairs = [
+        (_copy(data__noise=1), _copy(data__noise=1.0)),
+        (_copy(model__l2=0), _copy(model__l2=0.0)),
+        (_copy(model__epochs=5), _copy(model__epochs=5.0)),
+        (_copy(seed=7), _copy(seed=7.0)),
+        (_copy(model__learning_rate="0.1"), _copy()),
+        (_copy(data__n_rows="500"), _copy()),
+    ]
+    for left, right in pairs:
+        a, b = C.from_dict(left).fingerprint(), C.from_dict(right).fingerprint()
+        assert a == b, "{} fingerprints as {} and {}".format(left, a, b)
+
+
+def check_coercion_refuses_a_cast_that_would_lose_something():
+    """The other half. Coercing without a loss rule would turn 5.5 epochs into 5 quietly,
+    which trades a visible fingerprint problem for an invisible training one."""
+    _expect_error(_copy(model__epochs=5.5), "whole number")
+    _expect_error(_copy(seed=7.5), "whole number")
+    _expect_error(_copy(data__n_rows=500.5), "whole number")
+    _expect_error(_copy(data__noise="abc"), "not a number")
+    _expect_error(_copy(model__epochs="five"), "not a number")
+
+
+def check_bool_is_refused_everywhere_it_could_pass_as_a_number():
+    """`isinstance(True, int)` is True, so a bool reaches an int field unless something
+    stops it, and `epochs: yes` is a real thing to type in YAML."""
+    _expect_error(_copy(model__epochs=True), "bool")
+    _expect_error(_copy(data__noise=False), "bool")
+    _expect_error(_copy(seed=True), "bool")
+    _expect_error(_copy(model__init=True), "must be a string")
+
+
+def check_a_non_string_name_is_refused_rather_than_stringified():
+    """`name: 2026` is more likely a mistake than an intent. str(value) would accept it and
+    the run would be called "2026" with nothing saying so."""
+    _expect_error(_copy(name=2026), "must be a string")
+    _expect_error(_copy(model__init=1), "must be a string")
+
+
+def check_declared_types_resolves_past_the_postponed_annotations():
+    """`fields(cls)[i].type` is the string "int" in that module, because of the
+    `from __future__ import annotations` at its top. Calling it would call a string."""
+    types = C.declared_types(C.DataConfig)
+    assert types["n_rows"] is int, types["n_rows"]
+    assert types["noise"] is float, types["noise"]
+    assert C.declared_types(C.ModelConfig)["init"] is str
+    assert set(types) == {"n_rows", "n_features", "positive_rate", "noise", "holdout_frac"}
+
+
+def check_coerce_refuses_a_type_it_has_no_rule_for():
+    """A field declared as something this module does not handle has to fail loudly. The
+    silent version returns the value untouched and the fingerprint goes back to depending
+    on whatever the file happened to contain."""
+    try:
+        C.coerce([1, 2], list, "somewhere")
+    except C.ConfigError as exc:
+        assert "no rule" in str(exc), str(exc)
+    else:
+        raise AssertionError("coerced a value to a type with no rule")
+
+
 def check_fingerprint_moves_on_every_field():
     """One field at a time. A fingerprint that ignores a field it should read is the
     failure that lets the gate call two different runs the same run."""

@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.run_all import MODULES  # noqa: E402
 from tests.runner import run_checks  # noqa: E402
 
-EXTRA = ["tests.test_tracking"]
+EXTRA = ["tests.test_tracking", "tests.test_registry"]
 
 
 def main(argv) -> int:

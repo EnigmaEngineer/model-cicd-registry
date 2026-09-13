@@ -57,6 +57,30 @@ def _top_level_imports(path):
     return names
 
 
+def _module_level_imports(path):
+    """Only the imports that run when the module is imported.
+
+    `_top_level_imports` walks the whole tree, which is what the declared-against-imported
+    checks want. It is the wrong question for the optional package rule. An import sitting
+    inside `if args.track:` does not run on a clone that never passes that flag, so a
+    script carrying one is not on the core path and does not need an exemption. Exempting
+    the whole file instead would hide a later module level import in the same file, which
+    is the failure the stale exemption check below exists to prevent.
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), filename=path)
+
+    names = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                names.add(node.module.split(".")[0])
+    return names
+
+
 def _requirements_files():
     """Every requirements file, found rather than listed.
 
@@ -128,14 +152,25 @@ def check_nothing_on_the_core_training_path_needs_an_optional_package():
     assert optional, "no optional packages, so this check is looking at nothing"
 
     stdlib = set(sys.stdlib_module_names)
-    allowed = {"mcr/tracking.py", "tests/test_tracking.py", "tests/run_with_mlflow.py"}
+    # Only files that reach for an optional package at import time. tests/test_tracking.py
+    # and tests/run_with_mlflow.py were on this list and came off it, because neither
+    # actually imports mlflow at module level and the sharper reading above says so.
+    allowed = {
+        "mcr/tracking.py",
+        "mcr/registry.py",
+        "tests/test_registry.py",
+        "scripts/registry_probe.py",
+    }
     used_the_exemption = set()
+    guarded = 0
 
     for path in _source_files():
         rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
         imported = {
-            n for n in _top_level_imports(path) if n not in stdlib and n not in LOCAL
+            n for n in _module_level_imports(path) if n not in stdlib and n not in LOCAL
         }
+        if (_top_level_imports(path) & optional) - imported:
+            guarded += 1
         leaked = sorted(imported & optional)
         if rel in allowed:
             if leaked:
@@ -147,6 +182,12 @@ def check_nothing_on_the_core_training_path_needs_an_optional_package():
     # name on the list has to be there for a reason the source can show.
     stale = sorted(allowed - used_the_exemption)
     assert not stale, "exempted from the optional rule and importing nothing optional: {}".format(stale)
+
+    # The other way this check can quietly stop working. If the module level and whole
+    # tree readings ever agree everywhere, the distinction above is doing nothing and the
+    # scripts have either lost their guards or gained an exemption.
+    assert guarded, "no file imports an optional package behind a guard, so the module "\
+                    "level reading is not being tested against anything"
 
 
 def check_every_declared_package_is_imported():

@@ -5,8 +5,9 @@ the thing that identifies a model is kept separate from the thing that decides w
 is any good. The end state is a merge that takes a model all the way to a canary deploy.
 Rollback is one command.
 
-What is here so far is the config system, the seed control, the training pipeline and the
-MLflow tracking layer. The registry, the promotion gate and the deploy are not built yet.
+What is here so far is the config system, the seed control and the training pipeline. On
+top of those sit the MLflow tracking layer and the registry, which carries stage transitions
+and a one command rollback. The promotion gate and the canary deploy are not built yet.
 
 ## Run it
 
@@ -46,6 +47,16 @@ python3 scripts/track_probe.py
 python3 tests/run_with_mlflow.py
 ```
 
+The registry sits on the same store.
+
+```
+python3 scripts/train.py configs/baseline.yml --track sqlite:///mlflow.db --register mcr-fraud
+python3 scripts/registry.py --store sqlite:///mlflow.db list
+python3 scripts/registry.py --store sqlite:///mlflow.db promote 1 production
+python3 scripts/registry.py --store sqlite:///mlflow.db rollback production
+python3 scripts/registry_probe.py
+```
+
 ## What is here
 
 ```
@@ -56,10 +67,11 @@ mcr/model.py      logistic regression by gradient descent, numpy only
 mcr/artifact.py   deterministic serialisation and a content hash
 mcr/train.py      the pipeline. config in, artefact out, nothing else
 mcr/tracking.py   MLflow. write a run, read it back, rebuild the config from what came back
+mcr/registry.py   which model is in production, which one was there before, and rollback
 ```
 
-Three entry points in `scripts/`. Two runners in `tests/`, carrying 85 checks without
-MLflow and 104 with it.
+Five entry points in `scripts/`. Two runners in `tests/`, carrying 85 checks without MLflow
+and 147 with it.
 
 ## Tracking, and the question it is built to answer
 
@@ -84,8 +96,8 @@ control: junk param value is refused     OK   data.noise is not a number: 'nine'
 The recipe goes into params and the mutable state goes into tags, and that split was
 measured rather than copied from a tutorial. On mlflow 3.16.0, `log_param` on a key holding
 a different value raises and `set_tag` overwrites silently. So params are immutable for
-free, which is what a recipe should be, and tags are where the registry's stage
-transitions belong.
+free, which is what a recipe should be. The stage does **not** live in a tag, and
+`docs/adr-0003` reverses that half of the argument on a later measurement.
 
 Two more measurements from the same pass. A param value over 6,000 characters and a tag
 value over 8,000 come back **truncated**, with a warning on stderr and no exception, so a
@@ -95,6 +107,109 @@ and tells you to use a database, so every command above uses sqlite.
 
 `docs/adr-0002` has the rest, including the defect this layer uncovered in the config
 fingerprint.
+
+## The registry, and the two things MLflow will not do
+
+MLflow has a registry with stages in it. This project does not use them, and the reason is
+measured rather than stylistic. Everything below is `python3 scripts/registry_probe.py` on
+mlflow 3.16.0 today.
+
+```
+stage transition, nothing passed it does not require   versions in Production: [1, 2]
+the same call with archive_existing_versions=True      versions in Production: [1]
+two versions both tagged stage=production              allowed, search returns [1, 2]
+alias moved from v1 to v2                              v1 aliases [], v2 aliases ['production']
+v1 after losing the alias                              last_updated_timestamp == creation_timestamp
+```
+
+`transition_model_version_stage` is deprecated with a removal notice, and its default leaves
+two versions in Production at once. A deploy reading "the production model" out of that
+store gets whichever row comes back first, and `search_model_versions` does not sort. It
+returned `[3, 1]` and `[2, 1]` in one session.
+
+A version tag has the same hole, which is why the stage is not in one.
+
+An alias does not. Moving `production` to a new version takes it off the old one in the same
+call, so exclusivity is the store's behaviour rather than a rule this code has to remember.
+
+**The cost is that an alias move leaves no trace at all.** The row of the version that lost
+it is not even touched. So the registry can say what is in production and it cannot say what
+was, and a rollback is a question about what was. The transition log is written here, one
+tag per transition on the registered model.
+
+The last measurement is the one worth arguing about. A rollback target derived from the
+store alone has to guess, and the obvious guess is the highest version that is not current.
+That is wrong as soon as a candidate is registered and rejected without ever being promoted,
+which is the normal case once the gate exists.
+
+```
+log says 1, store-only guess says 4
+```
+
+## The reference that names two models
+
+MLflow refuses an alias containing a slash. It accepts an alias that is a decimal number.
+So this is allowed while version 2 exists:
+
+```python
+cli.set_registered_model_alias(name, "2", "4")
+```
+
+and the string `"2"` now names two different models, trained from two different runs.
+
+```
+get_model_version(name, "2")             run 6b8c4048
+get_model_version_by_alias(name, "2")    run 6fd44793
+```
+
+`registry.resolve` refuses rather than picking one. Which model you get otherwise depends on
+which function the caller reached for, and the caller has no way to know that is a question.
+
+## Rollback is not "whatever it held before"
+
+That was the first rule written and a check caught it the same hour.
+
+Promote version 1. Then 2. Then 3. Now roll back. Production sits on 2 and the version it
+held immediately before 2 really was 3. So a second rollback goes back to 3, which is the
+model that was just rolled away from. Rollback would oscillate between the last two versions,
+never reach version 1, and report success every time.
+
+A version a rollback moved away from is abandoned now, and the walk skips it. The direction
+of each move is stored on the log entry rather than worked out from the version numbers,
+because a deliberate redeploy of an older model has exactly the same shape in the log.
+
+## What the rollback changed, and what it did not
+
+Two models are registered. Rolling production from version 2 back to version 1 swaps one
+artefact for a different one, and the two are indistinguishable.
+
+```
+artefact hashes                         8b83b8d77ac9 and 827ec647b844, different
+max |p_a - p_b| over 5,000 holdout rows                       2.014e-09
+holdout rows whose 0.5 decision differs                       0 of 5000
+holdout_roc_auc gap                                           0.000e+00
+holdout_log_loss gap                                          1.806e-11
+```
+
+The rollback is real. The registry moved, the alias moved, the log recorded it. Nothing a
+user could observe changed, because `baseline` and `candidate-lr` both converge on this
+corpus and adr-0001 already said so.
+
+That is a fact about the corpus rather than about the registry, and it is the reason
+`configs/candidate-underfit.yml` exists. One epoch instead of four hundred.
+
+```
+                      baseline    candidate-lr   candidate-underfit
+holdout_roc_auc       0.675518    0.675518       0.675312
+holdout_log_loss      0.449239    0.449239       0.641871
+holdout_accuracy      0.816000    0.816000       0.814800
+```
+
+**A gate reading AUC would pass it.** Across seven configs measured today, from one epoch
+to four hundred and from a learning rate of 0.0001 up to 1.5, holdout AUC spans 0.675312 to
+0.675518. That is a range of 2.06e-04 on a rank based metric, because the direction of the
+weight vector settles almost immediately and AUC only reads the ranking. Log loss over the
+same seven spans 0.449239 to 0.688811, and that is the metric with something to say.
 
 ## The measurement
 
@@ -118,12 +233,18 @@ oracle. Control clean either side of every pass.
 
 ```
 mcr/config.py     36 of 36 killed      re-measured after the coercion change
+mcr/registry.py   31 of 32             oracle is the registry checks alone
 mcr/tracking.py   10 of 10             oracle is tests/run_with_mlflow.py
 mcr/seed.py        7 of 7
 mcr/model.py      81 of 89
 mcr/artifact.py    6 of 7
 mcr/data.py       18 of 26
 ```
+
+The one survivor in `registry.py` steps the log sequence number by two instead of one.
+Ordering comes from a lexical sort over the keys and nothing reads the number itself, so
+gaps are invisible by construction. It reaches the four digit ceiling twice as fast, which
+is the only difference and is ten thousand transitions away.
 
 `tracking.py` needed its own oracle. Graded against `tests/run_all.py`, which cannot import
 it, every mutant survives and the pass reads as a coverage disaster rather than as a pass
@@ -186,9 +307,24 @@ behaves, which is the point of the project.
 from log odds that are linear in the logs of the features, and noise is added before the
 draw. If the generator were itself a fitted logistic model a good fit would be a tautology.
 
-**Nothing has been registered, gated or deployed yet.** Tracking is in. The registry with
-stage transitions comes next, then a promotion gate against a frozen holdout, then a canary
-deploy with a rollback.
+**Nothing is gated or deployed yet.** Tracking and the registry are in. A promotion gate
+against a frozen holdout comes next, then a canary deploy.
+
+**A config that trains to a NaN loss still produces a registerable artefact.** Measured
+today: `l2: 100` overflows in `mcr/model.py` and the holdout log loss comes back NaN, with
+`l2: 10` giving an AUC of 0.377, worse than a coin. Training returns a model, the artefact
+gets a hash, and `registry.register` takes it. Nothing on the path from a config to a
+version checks that a metric is finite. The natural home for that refusal is the promotion
+gate and it is not written yet, so as of today a broken model can reach the registry.
+
+**The transition log holds ten thousand entries per stage.** The sequence number is zero
+padded to four digits and ordering is a lexical sort over the tag keys, so entry 10000
+sorts into the wrong place. Not worth engineering around and worth knowing.
+
+**`promote` cannot survive two writers.** It picks a sequence number from a read and there
+is no compare and set in this API. It reads the key back and refuses if it does not hold
+what it wrote, which detects a lost update rather than preventing one. Single writer here,
+so it has never fired.
 
 **`scripts/track_probe.py` cannot see a typing defect and I know it.** MLflow returns every
 value as a string, so the rebuild only ever exercises one branch of `config.coerce`. The
@@ -199,7 +335,10 @@ and the probe owns the store half.
 **Nothing grades `scripts/track_probe.py` itself.** Its comparisons live in the script
 rather than in a module the suite imports, so a defect in an arm is invisible to mutation.
 The same is true of `scripts/repro_probe.py`. Moving the arithmetic into `mcr/` is the fix
-and it is not done.
+and it is not done. `scripts/registry_probe.py` is the same shape and answers it differently
+for now: every arm about this repo's code runs a control against a stand in carrying the
+defect the arm exists to catch, and the probe fails if a control passes. That caught a bad
+arm on the first run, where the naive rollback guess and the right answer happened to agree.
 
 **The holdout AUC of 0.676 is modest and that is the corpus, not the optimiser.** The noise
 term is 0.9 in log odds and nine of the twelve features are damped to near zero weight.

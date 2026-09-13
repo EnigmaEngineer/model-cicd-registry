@@ -29,11 +29,22 @@ def main(argv=None) -> int:
     parser.add_argument("--out", default=None, help="where to write the artefact")
     parser.add_argument("--track", default=None, help="mlflow tracking uri")
     parser.add_argument("--experiment", default=None, help="mlflow experiment name")
+    parser.add_argument(
+        "--register",
+        default=None,
+        metavar="MODEL",
+        help="also put the artefact in the registry under this model name",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
     if args.experiment and not args.track:
         parser.error("--experiment needs --track")
+    # Registering needs a run to point the version at, and the run only exists if the
+    # tracking half ran. Refusing here beats creating a version whose source is a run id
+    # that was never written.
+    if args.register and not args.track:
+        parser.error("--register needs --track")
 
     cfg = load(args.config)
     result = train_mod.run(cfg)
@@ -42,6 +53,7 @@ def main(argv=None) -> int:
         result.artifact.write(args.out)
 
     run_id = None
+    version = None
     if args.track:
         from mcr import tracking
 
@@ -54,6 +66,16 @@ def main(argv=None) -> int:
             experiment=args.experiment or tracking.EXPERIMENT,
         )
 
+        if args.register:
+            import mlflow
+
+            from mcr import registry
+
+            reg = mlflow.MlflowClient(tracking_uri=args.track, registry_uri=args.track)
+            version = registry.register(
+                reg, args.register, run_id, result.content_hash, cfg.fingerprint()
+            )
+
     if not args.quiet:
         print("name         {}".format(cfg.name))
         print("config       {}".format(cfg.fingerprint()))
@@ -61,6 +83,8 @@ def main(argv=None) -> int:
         print("seed         {}".format(cfg.seed))
         if run_id:
             print("mlflow run   {}".format(run_id))
+        if version is not None:
+            print("version      {} of {}".format(version, args.register))
         print("")
         for key in sorted(result.metrics):
             if key.startswith("holdout_"):

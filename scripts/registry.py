@@ -1,0 +1,122 @@
+"""Read and move the registry from a command line.
+
+    python3 scripts/registry.py --store sqlite:///mlflow.db list
+    python3 scripts/registry.py --store sqlite:///mlflow.db promote 3 production
+    python3 scripts/registry.py --store sqlite:///mlflow.db history production
+    python3 scripts/registry.py --store sqlite:///mlflow.db rollback production
+
+`rollback` is the one command the project promises. It reads the transition log, finds what
+production held before whatever it holds now, and points production back at it. It refuses
+rather than guessing if the log does not describe the store, which happens the moment
+somebody moves the alias in the MLflow UI.
+
+Needs requirements-tracking.txt. mcr.registry is imported inside main for that reason, so
+`--help` works on an install that has no MLflow in it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+DEFAULT_MODEL = "mcr-fraud"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="read and move the model registry")
+    parser.add_argument("--store", required=True, help="mlflow tracking and registry uri")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("list", help="every version, with the stage it holds")
+
+    p = sub.add_parser("promote", help="point a stage at a version")
+    p.add_argument("ref", help="a version number or the stage that currently holds it")
+    p.add_argument("stage")
+
+    p = sub.add_parser("history", help="every transition of one stage, oldest first")
+    p.add_argument("stage")
+
+    p = sub.add_parser("rollback", help="put a stage back on the version it held before")
+    p.add_argument("stage")
+
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+
+    import mlflow
+
+    from mcr import registry
+
+    cli = mlflow.MlflowClient(tracking_uri=args.store, registry_uri=args.store)
+
+    if args.command == "list":
+        holders = {}
+        for stage in registry.STAGES:
+            v = registry.current(cli, args.model, stage)
+            if v is not None:
+                holders.setdefault(v, []).append(stage)
+        rows = registry.versions(cli, args.model)
+        if not rows:
+            print("no versions of {}".format(args.model))
+            return 0
+        print("{:>7}  {:<12}  {:<18}  {}".format("version", "config", "stage", "artifact"))
+        for v in rows:
+            n = int(v.version)
+            print(
+                "{:>7}  {:<12}  {:<18}  {}".format(
+                    n,
+                    v.tags.get("config_fingerprint", "?"),
+                    ",".join(holders.get(n, [])) or "-",
+                    v.tags.get("artifact_hash", "?")[:16],
+                )
+            )
+        return 0
+
+    try:
+        if args.command == "promote":
+            entry = registry.promote(cli, args.model, args.ref, args.stage)
+            if not entry.logged:
+                print("{} already points at version {}".format(args.stage, entry.to_version))
+                return 0
+            print(
+                "{}: {} -> {}".format(
+                    args.stage,
+                    entry.from_version if entry.from_version is not None else "nothing",
+                    entry.to_version,
+                )
+            )
+            return 0
+
+        if args.command == "history":
+            log = registry.history(cli, args.model, args.stage)
+            if not log:
+                print("{} has never been pointed at anything".format(args.stage))
+                return 0
+            for e in log:
+                print(
+                    "{}  {} -> {}".format(
+                        e.at_ms, e.from_version if e.from_version is not None else "-",
+                        e.to_version
+                    )
+                )
+            return 0
+
+        if args.command == "rollback":
+            entry = registry.rollback(cli, args.model, args.stage)
+            print("{}: rolled back to version {}".format(args.stage, entry.to_version))
+            return 0
+    except registry.RegistryError as exc:
+        print("refused: {}".format(exc), file=sys.stderr)
+        return 2
+
+    raise AssertionError("argparse accepted a command nothing handles")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

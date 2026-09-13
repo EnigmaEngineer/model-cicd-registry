@@ -1,0 +1,24 @@
+# A model that is genuinely worse, for the gate to reject.
+#
+# baseline and candidate-lr both converge on this corpus and score identically, so a gate
+# comparing them decides on a gap of zero. This one stops after a single pass. It is worse
+# in the way a real undertrained model is worse, which is on calibration rather than on
+# ranking, and that is the point of it. Its holdout AUC is 0.675312 against 0.675518 and
+# its log loss is 0.641871 against 0.449239.
+#
+# A gate reading AUC would pass it.
+name: candidate-underfit
+seed: 20260911
+
+data:
+  n_rows: 20000
+  n_features: 12
+  positive_rate: 0.18
+  noise: 0.9
+  holdout_frac: 0.25
+
+model:
+  learning_rate: 0.5
+  epochs: 1
+  l2: 0.001
+  init: zeros

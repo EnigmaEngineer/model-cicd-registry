@@ -7,7 +7,8 @@ Rollback is one command.
 
 What is here so far is the config system, the seed control and the training pipeline. On
 top of those sit the MLflow tracking layer and the registry, which carries stage transitions
-and a one command rollback. The promotion gate and the canary deploy are not built yet.
+and a one command rollback. In front of the registry is the promotion gate, which decides
+whether a candidate is allowed to move production. The canary deploy is not built yet.
 
 ## Run it
 
@@ -57,6 +58,16 @@ python3 scripts/registry.py --store sqlite:///mlflow.db rollback production
 python3 scripts/registry_probe.py
 ```
 
+And the gate sits in front of it.
+
+```
+python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 2
+python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 2 --promote
+python3 scripts/gate_probe.py
+```
+
+`gate_probe.py` needs no MLflow at all.
+
 ## What is here
 
 ```
@@ -68,10 +79,11 @@ mcr/artifact.py   deterministic serialisation and a content hash
 mcr/train.py      the pipeline. config in, artefact out, nothing else
 mcr/tracking.py   MLflow. write a run, read it back, rebuild the config from what came back
 mcr/registry.py   which model is in production, which one was there before, and rollback
+mcr/gate.py       whether a candidate is allowed to replace the incumbent
 ```
 
-Five entry points in `scripts/`. Two runners in `tests/`, carrying 85 checks without MLflow
-and 147 with it.
+Seven entry points in `scripts/`. Two runners in `tests/`, carrying 139 checks without
+MLflow and 201 with it.
 
 ## Tracking, and the question it is built to answer
 
@@ -211,6 +223,171 @@ to four hundred and from a learning rate of 0.0001 up to 1.5, holdout AUC spans 
 weight vector settles almost immediately and AUC only reads the ranking. Log loss over the
 same seven spans 0.449239 to 0.688811, and that is the metric with something to say.
 
+## The gate, and why it does not read the numbers in the store
+
+Both runs are in the tracking store and both recorded a holdout log loss, so the obvious
+gate is one line comparing them. That line is wrong twice and the second one is the
+interesting one.
+
+Every run generates its own corpus from its own config, so its holdout is a slice of that
+corpus. Two runs share a holdout only when their data section and their seed both match.
+Nothing was checking that, and the seed is inside the config fingerprint, so two configs
+differing only in it are two perfectly legitimate candidates.
+
+Hold the model config completely still and move only the seed.
+
+```
+12 seeds, each on its own holdout: 0.341545 to 0.449239, span 0.107693
+the gap the gate exists to catch:  0.192633
+so the corpus draw is 55.9% of that gap
+```
+
+So the gate builds one holdout, rebuilds both models out of their artefact bytes, and
+scores them on the same rows. The numbers the runs recorded still appear in the report, in
+a column saying that is what they are. When the two columns disagree, the disagreement is
+the point.
+
+```
+                           shared holdout  its own holdout      roc auc
+baseline                         0.449239         0.449239     0.675518
+candidate-lr                     0.449239         0.449239     0.675518
+candidate-underfit               0.641871         0.641871     0.675312
+candidate-inverted              19.701270        19.701270     0.377109
+candidate-diverged                    nan              nan     0.515824
+baseline-other-corpus            0.811947         0.341545     0.351162
+```
+
+The last row is the whole argument. It recorded a better number than the incumbent and it
+is nearly twice as bad on the rows they are both judged on. A gate reading the store
+promotes it.
+
+Some of that gap is this generator drawing a fresh set of true weights per seed, so a model
+from another corpus has no reason to transfer at all. The 0.107693 span above is the honest
+figure and it is measured with nothing transferring anywhere.
+
+## Rejecting a model
+
+Three models registered, `baseline` in production, and `candidate-underfit` put up against
+it.
+
+```
+$ python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 2
+candidate    version 2 of mcr-fraud
+incumbent    version 1
+
+holdout      56ab7ecf5a6b
+metric       log_loss, lower is better
+
+                                  on this holdout    roc auc   as the run ran
+incumbent baseline                       0.449239   0.675518         0.449239
+candidate candidate-underfit             0.641871   0.675312         0.641871
+
+paired diff  +1.926328e-01  interval [+1.780119e-01, +2.072537e-01]
+verdict      reject  (worse)
+             candidate is worse by 0.192633 on log_loss, interval [0.178012, 0.207254]
+exit=1
+```
+
+Exit codes carry the verdict. 0 promote, 1 reject, 2 refuse. The last two are different on
+purpose and the next section is why.
+
+## The comparison that is False in both directions
+
+`configs/candidate-diverged.yml` trains to a NaN. `l2: 100` overflows and training does not
+raise. The artefact serialises. The content hash is computed over a payload holding a NaN
+and the registry takes it.
+
+A comparison against a NaN is False whichever way round it is written.
+
+```
+lower is better, candidate is NaN:  nan < good   ->  False
+lower is better, incumbent is NaN:  good < nan   ->  False
+```
+
+So a one line gate rejects a NaN candidate, which looks correct. And it rejects every
+candidate forever once a NaN model holds the stage, with a message blaming the candidate.
+One silent False, two completely different outcomes.
+
+```
+$ python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 1
+candidate    version 1 of mcr-fraud
+incumbent    version 3
+
+holdout      56ab7ecf5a6b
+metric       log_loss, lower is better
+
+                                  on this holdout    roc auc   as the run ran
+incumbent candidate-diverged                  nan   0.515824              nan
+candidate baseline                       0.449239   0.675518         0.449239
+
+verdict      refuse  (incumbent_not_finite)
+             the incumbent candidate-diverged scores nan on log_loss, so nothing can be shown to beat it. Fix or unpoint the incumbent.
+exit=2
+```
+
+`configs/candidate-inverted.yml` is the harder one. `l2: 10` does not diverge. Holdout AUC
+comes back at 0.377109, which is worse than a coin. Log loss is 19.701270. Every metric is
+finite and nothing about their shape is wrong. It puts 204 bytes of RuntimeWarning on
+stderr and exits 0, and nothing reads exit code zero and then goes hunting through stderr.
+
+## What the gate scores, and what doing nothing scores
+
+Nine cases with a known right answer, and the floor printed underneath, because a headline
+of nine out of nine means nothing until somebody says what a coin gets.
+
+```
+incumbent              candidate              want      got       reason
+-                      baseline               promote   promote   no_incumbent
+baseline               candidate-lr           reject    reject    not_separated
+baseline               candidate-underfit     reject    reject    worse
+candidate-underfit     baseline               promote   promote   better
+baseline               candidate-inverted     reject    reject    worse
+baseline               candidate-diverged     refuse    refuse    candidate_not_finite
+candidate-diverged     baseline               refuse    refuse    incumbent_not_finite
+baseline               baseline               refuse    refuse    same_artifact
+baseline               other-corpus           reject    reject    worse
+
+  promote everything   2 of 9
+  reject everything    4 of 9
+  refuse everything    3 of 9
+  the naive rule       4 of 9
+  this gate            9 of 9
+```
+
+The naive rule is the one line this replaced, kept in the probe so the cases have something
+to be compared against. It gets four, which is what rejecting everything gets.
+
+The nine cases were written by me, so the honest thing to say is what is missing from them.
+There is no case where a candidate is better by a small but real margin. The resolution
+table below is what covers that ground instead.
+
+## What the gate can actually see
+
+```
+epochs   gap vs the incumbent   relative   verdict
+20                 8.2012e-03    1.8256%   worse
+40                 1.1332e-03    0.2523%   worse
+45                 7.6109e-04    0.1694%   not separated
+100                2.8463e-05    0.0063%   not separated
+400                0.0000e+00    0.0000%   not separated
+```
+
+Smallest difference it called, 1.1332e-03. Largest it declined, 7.6109e-04. So on 5,000
+rows its resolution is about a fifth of one percent of the loss.
+
+Put that beside the corpus span and the design argument is one line. **The number a gate
+reading the store would have compared moves by 95 times the smallest real difference this
+gate can detect.**
+
+The interval is a two sided 95 percent interval on the mean paired difference, computed in
+closed form. It started out as a percentile bootstrap and `docs/adr-0004` has the
+measurement that took it off the decision path. A mutation pass moved the bootstrap's
+default seed from 0 to 1 and survived, and on a candidate near the resolution above the
+verdict really does flip between `worse` and `not_separated` across thirty two seeds.
+
+A vote would not work either. `candidate-lr` beats `baseline` on 3,846 of 5,000 rows with a
+mean difference of 1.8e-11, because the last bits of a float carry a consistent sign.
+
 ## The measurement
 
 Reproducibility is a claim, so it gets a probe rather than a sentence. Five arms, measured
@@ -233,6 +410,7 @@ oracle. Control clean either side of every pass.
 
 ```
 mcr/config.py     36 of 36 killed      re-measured after the coercion change
+mcr/gate.py       52 of 57
 mcr/registry.py   31 of 32             oracle is the registry checks alone
 mcr/tracking.py   10 of 10             oracle is tests/run_with_mlflow.py
 mcr/seed.py        7 of 7
@@ -240,6 +418,20 @@ mcr/model.py      81 of 89
 mcr/artifact.py    6 of 7
 mcr/data.py       18 of 26
 ```
+
+The gate pass is the one that changed the code rather than the tests. It went 24 of 40
+first, and the sixteen survivors were classified one at a time by unparsing each mutant and
+reading the diff. Two of them were the comparisons that decide a promotion, `hi < 0` and
+`lo > 0`, alive because every fixture sat well away from both boundaries. One loosened the
+clip in the loss, which is the only thing between a fully confident model and an infinite
+loss. And one moved the bootstrap's default seed, which is what put the resampler on trial
+and eventually off the decision path.
+
+The five that are left in `gate.py` are `RESAMPLES`, which only the second interval reads,
+and four inside the bisection that finds a normal quantile. That loop breaks on a tolerance
+after about fifty rounds against a cap of two hundred, so its cap is unreachable, and the
+comparisons around it are equalities on floats. The answer is pinned against four known
+quantiles to nine decimal places instead.
 
 The one survivor in `registry.py` steps the log sequence number by two instead of one.
 Ordering comes from a lexical sort over the keys and nothing reads the number itself, so
@@ -307,15 +499,35 @@ behaves, which is the point of the project.
 from log odds that are linear in the logs of the features, and noise is added before the
 draw. If the generator were itself a fitted logistic model a good fit would be a tautology.
 
-**Nothing is gated or deployed yet.** Tracking and the registry are in. A promotion gate
-against a frozen holdout comes next, then a canary deploy.
+**Nothing is deployed yet.** Tracking, the registry and the gate are in. The canary deploy
+comes next.
 
-**A config that trains to a NaN loss still produces a registerable artefact.** Measured
-today: `l2: 100` overflows in `mcr/model.py` and the holdout log loss comes back NaN, with
-`l2: 10` giving an AUC of 0.377, worse than a coin. Training returns a model, the artefact
-gets a hash, and `registry.register` takes it. Nothing on the path from a config to a
-version checks that a metric is finite. The natural home for that refusal is the promotion
-gate and it is not written yet, so as of today a broken model can reach the registry.
+**A config that trains to a NaN loss still reaches the registry.** `l2: 100` overflows in
+`mcr/model.py`, training returns a model, the artefact gets a hash and `registry.register`
+takes it. The gate refuses to compare it and the gate is not on the registration path, so a
+broken model can still be registered. It just cannot be promoted. Moving the check earlier
+would mean `register` computing a metric, which means `register` knowing about holdouts, and
+that is a worse shape than the gap.
+
+**The holdout is not frozen in the usual sense.** `--holdout` defaults to
+`configs/baseline.yml`, so the rows come from regenerating the incumbent recipe's own
+corpus. Freezing properly means writing the rows to disk and hashing the file. The
+fingerprint already identifies the rows, so that is a small change rather than a large one,
+and it has not been made.
+
+**The gate checks no latency and no fairness.** A serious promotion gate usually checks
+both. Latency is measurable here and is not measured. Fairness has no subject at all,
+because the corpus is synthetic and carries no attribute anybody would protect, and
+inventing one would be a metric wearing a credible name.
+
+**The interval is on the mean.** A candidate that is better on most rows and catastrophic on
+a few can still win. A quantile of the paired difference would say something the mean does
+not, and there is nothing here that looks at the shape of the difference at all.
+
+**The nine gate cases were written by the same person who wrote the gate.** They cover no
+case where a candidate is genuinely better by a small margin, which is the case a real
+pipeline sees most often. The resolution table covers that ground by walking a candidate
+toward the incumbent, and that is a different thing from a case with a known right answer.
 
 **The transition log holds ten thousand entries per stage.** The sequence number is zero
 padded to four digits and ordering is a lexical sort over the tag keys, so entry 10000

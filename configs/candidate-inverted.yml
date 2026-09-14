@@ -1,0 +1,28 @@
+# A model that ranks backwards while every number it reports looks like a number.
+#
+# l2 at 10 is large enough to drag the weights past zero and out the other side. Holdout
+# AUC comes back at 0.377109, which is worse than a coin flip, and log loss at 19.701270.
+# Every metric is finite.
+#
+# This is the harder of the two broken cases to catch. The diverged config leaves a NaN
+# behind, which anything looking for one can find. This one leaves plausible floats and
+# the only thing wrong with them is their value.
+#
+# It does warn. A plain `scripts/train.py` run on it puts 204 bytes of RuntimeWarning on
+# stderr about an overflow in matmul, and exits 0. That is not much of a defence. Nothing
+# reads exit code zero and then goes looking through stderr.
+name: candidate-inverted
+seed: 20260911
+
+data:
+  n_rows: 20000
+  n_features: 12
+  positive_rate: 0.18
+  noise: 0.9
+  holdout_frac: 0.25
+
+model:
+  learning_rate: 0.5
+  epochs: 400
+  l2: 10.0
+  init: zeros

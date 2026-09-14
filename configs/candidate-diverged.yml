@@ -1,0 +1,24 @@
+# A config that trains to a NaN, for the gate to refuse rather than reject.
+#
+# l2 at 100 makes the weight update overshoot, the logits grow without bound and the loss
+# comes back NaN. Training does not raise. The artefact serialises, the content hash is
+# computed over a payload carrying a NaN, and the registry accepts it.
+#
+# It is here because a comparison against a NaN is False whichever way it is written, so a
+# gate written as `candidate < incumbent` rejects this quietly and looks correct. The same
+# silent False rejects every candidate forever once a model like this holds the stage.
+name: candidate-diverged
+seed: 20260911
+
+data:
+  n_rows: 20000
+  n_features: 12
+  positive_rate: 0.18
+  noise: 0.9
+  holdout_frac: 0.25
+
+model:
+  learning_rate: 0.5
+  epochs: 400
+  l2: 100.0
+  init: zeros

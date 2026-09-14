@@ -21,6 +21,7 @@ MODULES = [
     "tests.test_model",
     "tests.test_artifact",
     "tests.test_train",
+    "tests.test_gate",
     "tests.test_deps",
 ]
 

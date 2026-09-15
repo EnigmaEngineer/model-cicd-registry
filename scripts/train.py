@@ -23,7 +23,7 @@ from mcr import train as train_mod  # noqa: E402
 from mcr.config import load  # noqa: E402
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="train one model from one config")
     parser.add_argument("config")
     parser.add_argument("--out", default=None, help="where to write the artefact")
@@ -36,6 +36,11 @@ def main(argv=None) -> int:
         help="also put the artefact in the registry under this model name",
     )
     parser.add_argument("--quiet", action="store_true")
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.experiment and not args.track:

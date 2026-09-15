@@ -55,11 +55,15 @@ def _line(label, ok, detail):
     return ok
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs="?", default=os.path.join(ROOT, "configs", "baseline.yml"))
     parser.add_argument("--runs", type=int, default=3)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
 
     cfg = load(args.config)
     print("config {}  fingerprint {}\n".format(cfg.name, cfg.fingerprint()))

@@ -298,10 +298,14 @@ def section_floor(bad):
         print("  On this run the split beat every trivial answer, which it does not always do.")
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="measure the cost of splitting canary traffic")
     p.add_argument("--trials", type=int, default=400)
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
 
     bad = []
     section_router(bad)

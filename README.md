@@ -5,10 +5,15 @@ the thing that identifies a model is kept separate from the thing that decides w
 is any good. The end state is a merge that takes a model all the way to a canary deploy.
 Rollback is one command.
 
-What is here so far is the config system, the seed control and the training pipeline. On
-top of those sit the MLflow tracking layer and the registry, which carries stage transitions
-and a one command rollback. In front of the registry is the promotion gate, which decides
-whether a candidate is allowed to move production. The canary deploy is not built yet.
+What is here is the config system, the seed control and the training pipeline. On top of
+those sit the MLflow tracking layer and the registry, which carries stage transitions and a
+one command rollback. In front of the registry is the promotion gate, which decides whether
+a candidate is allowed to move production. Behind it is the canary, which routes a slice of
+traffic, and the deployment state that says which version is on trial and at what share.
+
+The rollback path is drilled rather than assumed. `scripts/drill.py` puts the store into
+states a crash really produces and checks what the recovery does, and one of those drills is
+why the rollback walk no longer trusts the raw transition log.
 
 ## Run it
 
@@ -66,12 +71,43 @@ python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 2 --promote
 python3 scripts/gate_probe.py
 ```
 
-And the canary sits behind it, routing a slice of traffic.
+And the canary sits behind it. Opening one is a change to the registry, not a flag on a
+command, so the share survives the process that set it.
 
 ```
-python3 scripts/canary.py --store sqlite:///mlflow.db --canary 4
-python3 scripts/canary.py --store sqlite:///mlflow.db --canary 4 --fraction 0.5
+python3 scripts/deploy.py open   --store sqlite:///mlflow.db --canary 4 --fraction 0.05
+python3 scripts/deploy.py status --store sqlite:///mlflow.db
+python3 scripts/canary.py --store sqlite:///mlflow.db --canary canary
+python3 scripts/deploy.py abort  --store sqlite:///mlflow.db
 python3 scripts/canary_probe.py
+```
+
+`canary.py` reads the share off the registry. Passing a `--fraction` that disagrees with
+what was deployed is refused rather than believed.
+
+The failure drills are the evidence for the rollback path and they run in seconds.
+
+```
+python3 scripts/drill.py
+```
+
+```
+ok     crash then retry same version, answer  3 (wanted 3)
+ok     raw log agrees here, so no damage      3 (wanted 3)
+ok     and settle still dropped the phantom   5 raw, 4 kept, 1 dropped
+ok     crash then ship a different version    raw log: 4  settled: 3  control: 3
+ok     crash after the alias moved            damaged: refused    control: 2
+ok     alias moved outside promote            damaged: refused    control: 2
+ok     two rollbacks reach the oldest         damaged: 1          control: 3
+
+ok     canary open crashed, then repaired     consistent (wanted consistent)
+ok     and it was really broken first         broken (wanted broken)
+ok     canary land crashed, then repaired     consistent (wanted consistent)
+ok     and it was really broken first         broken (wanted broken)
+ok     that repair left production alone      3 (wanted 3)
+ok     aborting a canary leaves production    damaged: 1          control: 2
+
+13 drills, 0 bad
 ```
 
 `gate_probe.py` and `canary_probe.py` need no MLflow at all.
@@ -89,10 +125,13 @@ mcr/tracking.py   MLflow. write a run, read it back, rebuild the config from wha
 mcr/registry.py   which model is in production, which one was there before, and rollback
 mcr/gate.py       whether a candidate is allowed to replace the incumbent
 mcr/canary.py     routing a slice of traffic, and the two comparisons that gives you
+mcr/deploy.py     what is deployed. production, the canary on trial, and the share it takes
 ```
 
-Eight entry points in `scripts/`. Two runners in `tests/`, carrying 189 checks without
-MLflow and 251 with it.
+Ten entry points in `scripts/`. Three runners in `tests/`, carrying 200 checks without
+MLflow and 304 with it. The third runner covers the registry and deployment modules only,
+at 15.4 seconds against 28.6 for the full store suite, which is what a mutation pass over
+those two modules needs to fit inside one shell invocation.
 
 ## Tracking, and the question it is built to answer
 
@@ -198,6 +237,99 @@ never reach version 1, and report success every time.
 A version a rollback moved away from is abandoned now, and the walk skips it. The direction
 of each move is stored on the log entry rather than worked out from the version numbers,
 because a deliberate redeploy of an older model has exactly the same shape in the log.
+
+## A crash mid deploy made rollback pick a version that never served
+
+The transition log is written before the alias moves. The two are not in a transaction, so
+one of them will eventually happen without the other, and this order was chosen on the
+argument that a recorded move which did not happen is visible while a silent move is not.
+
+The visible one turned out to be the dangerous one.
+
+Promote 1, then 2, then 3. Crash while writing the entry for version 4. Work out that
+version 4 is what broke the deploy and ship version 5 instead.
+
+```
+raw log          [1, 2, 3, 4, 5]
+alias            5
+rollback_target  4
+```
+
+Version 4 never served a request. It exists only as a log entry a crash left behind. The
+check meant to catch this compares the log's last entry against the alias, and it passes,
+because the retry wrote a correct last entry on top of the lie. So the store looks healthy
+and one command deploys a model that has never been in production.
+
+The fix needed no new writes, because the log already knew. A promote that completed leaves
+the alias on its `to_version`, so the next entry written reads that value as its own
+`from_version`. Every entry but the last has a witness inside the log, and the last one's
+witness is the alias. `registry.settle` drops any entry without one and says why.
+
+```
+crash then ship a different version   raw log: 4   settled: 3   control: 3
+```
+
+The control is the same sequence with no crash in it. Settled and control agree, and the
+raw reading disagrees with both, which is what makes that row a measurement rather than a
+green tick.
+
+The other crash order still refuses and that is the right answer. If the alias moved and
+nothing was written, the version that served is not in the log at all and the direction of
+the move is unrecoverable.
+
+This came out of `scripts/drill.py`, which is thirteen drills over states a crash really
+produces. Each one carries a control that has to come back healthy, because a drill whose
+control also reports the failure has proved nothing about the damage.
+
+## Opening a canary is a change to the registry
+
+The canary's share used to be a command line flag. Nothing in the store knew a canary was
+running or at what fraction, so a rollback verdict had nothing to undo and the exit code
+was the whole action.
+
+That is also what made the wrong action look right. An earlier version of the canary script
+had a `--rollback` flag which called `registry.rollback`. It ran end to end and moved
+production off a model the verdict said nothing about.
+
+A deployment is three facts the registry holds. Two aliases and a tag.
+
+```
+production        an alias, the version serving the control share
+canary            an alias, the version on trial, or nothing
+canary.fraction   a tag, the share the canary takes
+```
+
+`open_canary` puts a version on trial. `abort_canary` takes it off and leaves production
+where it is, which is what a rollback verdict means. `land_canary` makes the canary
+production. The distinction the deleted flag got wrong is now two functions with two names.
+
+```
+aborting a canary leaves production   damaged: 1   control: 2
+```
+
+The damaged arm is what the old flag did. The control is `abort_canary`.
+
+Both operations have a crash window of their own and both are drilled. `open_canary` writes
+the share before the alias, so a crash leaves a share with no canary. `land_canary` moves
+production before removing the canary alias, so a crash leaves both aliases on one version.
+`check_consistency` names each state in a sentence and `abort_canary` is the repair for
+both, without moving production in either case.
+
+## CI, and a check on a workflow that has never run
+
+`.github/workflows/ci.yml` takes a merge through the suite and the drills and the probes.
+What survives that reaches the gate and then the canary. It has never executed. There is no GitHub runner in the environment this was
+built in, so it is a description of intended wiring and not a green build.
+
+What can be checked without a runner is narrower. A step can name a script that was renamed,
+pass arguments the script refuses, or branch on an exit code the script cannot return.
+`tests/test_workflow.py` reads the file and checks all three on every commit.
+
+The argument check exists because the first two were not enough. They passed on a workflow
+whose opening deploy step called `scripts/train.py --store` against a script that takes
+`--track`, with a bare `--register` against a flag that needs a value. Neither would have
+run. So every `python3 scripts/X.py ...` in the workflow is now handed to `X.build_parser()`
+and really parsed.
 
 ## What the rollback changed, and what it did not
 
@@ -576,8 +708,37 @@ behaves, which is the point of the project.
 from log odds that are linear in the logs of the features, and noise is added before the
 draw. If the generator were itself a fitted logistic model a good fit would be a tautology.
 
-**Nothing is deployed yet.** Tracking, the registry and the gate are in. The canary deploy
-comes next.
+**There is no serving process anywhere in this project.** The registry holds which version
+is in production and which is on trial, and nothing is answering requests. Traffic is a
+replay of a generated holdout. So the operational half of a rollback, draining connections
+and restarting something, is absent rather than implemented badly. The obvious way to test
+a rollback is under load, and load is not a thing that can be measured here. What is
+drilled is the state machine, which is the half that exists.
+
+**The drills simulate a crash, they do not cause one.** Each damaged arm reproduces half of
+`promote` by hand rather than killing a process mid write. That is a faithful model of the
+state a crash leaves behind and it is not the same thing.
+
+**The CI workflow has never run.** `.github/workflows/ci.yml` describes the wiring and there
+is no runner here to execute it. `tests/test_workflow.py` checks that every script it names
+exists, that every command it issues parses against that script's own parser, and that every
+exit code it branches on is one the script can return. All three are checks on a file.
+
+**A crash between the alias move and the log write is not recoverable.** `settle` recovers
+the other order by dropping an entry the store cannot confirm. This one leaves the version
+that served absent from the log entirely, and the direction of the move with it, so
+`rollback_target` refuses. The refusal names what it found and there is no repair.
+
+**`settle` recovers a crash and does not authenticate a writer.** The witness rule works
+because `promote` and `retire` read the live alias into `from_version` immediately before
+writing. Anything else with write access to the store can add a tag that satisfies the rule
+and says whatever it likes. Defending against that needs a signature over each entry, which
+is a different problem from the one this solves.
+
+**`_next_seq` survives a mutation and the reason is that nothing rests on it.** Moving
+`max(used) + 1` to `+ 2` leaves gaps in the sequence and changes no outcome, because the
+keys are zero padded and only their order matters. It halves the headroom in the limitation
+two entries below this one.
 
 **A config that trains to a NaN loss still reaches the registry.** `l2: 100` overflows in
 `mcr/model.py`, training returns a model, the artefact gets a hash and `registry.register`

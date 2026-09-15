@@ -1,0 +1,28 @@
+# A model that is really worse and that a canary cannot see.
+#
+# candidate-underfit stops after one pass and is worse by 1.93e-01, which is so large that
+# the traffic split catches it on every draw. That makes it useless as a canary fixture,
+# because a canary is never shown a model like that. The gate stops those first.
+#
+# This one trains for twenty passes. It is worse by 8.2012e-03 on the shared holdout, the
+# gate rejects it deterministically, and at a five percent canary share the split
+# comparison promoted it on six draws out of two hundred and could not separate it on a
+# hundred and eighty eight. Its row losses correlate with the incumbent's at 0.996622,
+# which is the reason: pairing has a lot to exploit here and splitting throws it away.
+#
+# docs/adr-0005 carries the table. scripts/canary_probe.py reproduces it.
+name: candidate-close
+seed: 20260911
+
+data:
+  n_rows: 20000
+  n_features: 12
+  positive_rate: 0.18
+  noise: 0.9
+  holdout_frac: 0.25
+
+model:
+  learning_rate: 0.5
+  epochs: 20
+  l2: 0.001
+  init: zeros

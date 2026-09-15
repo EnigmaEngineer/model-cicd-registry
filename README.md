@@ -66,7 +66,15 @@ python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 2 --promote
 python3 scripts/gate_probe.py
 ```
 
-`gate_probe.py` needs no MLflow at all.
+And the canary sits behind it, routing a slice of traffic.
+
+```
+python3 scripts/canary.py --store sqlite:///mlflow.db --canary 4
+python3 scripts/canary.py --store sqlite:///mlflow.db --canary 4 --fraction 0.5
+python3 scripts/canary_probe.py
+```
+
+`gate_probe.py` and `canary_probe.py` need no MLflow at all.
 
 ## What is here
 
@@ -80,10 +88,11 @@ mcr/train.py      the pipeline. config in, artefact out, nothing else
 mcr/tracking.py   MLflow. write a run, read it back, rebuild the config from what came back
 mcr/registry.py   which model is in production, which one was there before, and rollback
 mcr/gate.py       whether a candidate is allowed to replace the incumbent
+mcr/canary.py     routing a slice of traffic, and the two comparisons that gives you
 ```
 
-Seven entry points in `scripts/`. Two runners in `tests/`, carrying 139 checks without
-MLflow and 201 with it.
+Eight entry points in `scripts/`. Two runners in `tests/`, carrying 189 checks without
+MLflow and 251 with it.
 
 ## Tracking, and the question it is built to answer
 
@@ -487,6 +496,74 @@ Derivation is a hash of the seed and the stream name rather than the seed plus a
 Under addition, seed 1 with the second stream and seed 2 with the first are the same number,
 so two runs one seed apart would share a stream. `tests/test_seed.py` checks 160 pairs for
 collisions.
+
+## The canary, and the measurement it cannot make
+
+The gate scores both models on one holdout. Every row is scored twice, so the comparison is
+paired, and that is where its resolution comes from.
+
+A canary routes a slice of traffic to the new model. Every request goes to one arm, so no
+request is ever scored by both and the comparison becomes two independent samples. The
+first draft of `mcr/canary.py` treated that as a detail.
+
+Five thousand rows, one incumbent, candidates at the epoch counts below. Measured by
+`scripts/canary_probe.py`, which takes no MLflow.
+
+```
+  epochs      true diff       corr  paired width split 5% width     ratio
+       1    +1.9263e-01   0.976561    2.9242e-02    3.6825e-02       1.3
+       5    +8.1657e-02   0.987130    1.9754e-02    6.6804e-02       3.4
+      20    +8.2012e-03   0.996622    6.5510e-03    1.2007e-01      18.3
+      40    +1.1332e-03   0.999390    2.1588e-03    1.3692e-01      63.4
+      45    +7.6109e-04   0.999611    1.6742e-03    1.3863e-01      82.8
+     100    +2.8463e-05   0.999998    1.1736e-04    1.4376e-01    1225.0
+```
+
+The cost of splitting is not a constant. It runs from 1.3 to 1225 and the correlation
+column is why. Two models that disagree everywhere give pairing little to exploit. Two
+models that are close give it a lot, and the split throws all of it away.
+
+Which matters because **a canary only ever sees models that are close.** Anything obviously
+bad has already been stopped by the gate. So the split is cheapest on the models a canary
+will never be shown and most expensive on every model it will.
+
+Here is that as a run. `configs/candidate-close.yml` is worse by 8.2012e-03 and the gate
+rejects it deterministically.
+
+```
+$ python3 scripts/canary.py --store sqlite:///mlflow.db --canary 4 --fraction 0.25
+
+                               requests    mean log_loss  positive rate
+control baseline                   3696         0.452341         0.1864
+canary candidate-close             1304         0.451203         0.1817
+
+split   (served)   -1.137506e-03  interval [-3.289643e-02, +3.062142e-02]
+shadow  (paired)   +8.201181e-03  interval [+4.925695e-03, +1.147667e-02]
+the split interval is 9.7 times wider than the paired one
+to reach the paired resolution the split needs about 605,539 requests at 25.0%
+
+verdict      hold  (not_separated)
+             the paired comparison on the same models says rollback
+```
+
+A quarter of all traffic, and the served numbers have the canary *ahead* by 1.1e-03 on a
+model that is really behind by 8.2e-03.
+
+The split comparison is not miscalibrated. Over two hundred draws at a five percent share,
+two models that genuinely are alike come back promote about one draw in twenty, which is
+the nominal rate of a two sided ninety five percent interval. It is correct and
+underpowered, and the underpowering was chosen rather than forced.
+
+So the module separates the two things a canary was doing at once. **Routing decides what
+is served** and bounds the blast radius, which is worth having on its own. **Scoring
+decides what is measured**, and `observe` scores both models on every request, which makes
+the comparison paired again for one extra forward pass. The verdict still comes off the
+served traffic, because that is the comparison a real canary has, and the shadow figures
+sit beside it in the report. When they disagree the report says so.
+
+That only works for a metric computable without knowing what was served. Log loss is. A
+click on the recommendation that was shown is not, and for those the split is the only
+comparison there is and the bill above is real. `docs/adr-0005` carries both halves.
 
 ## Known limitations
 

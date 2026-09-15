@@ -252,9 +252,12 @@ class CanaryResult:
     required: Optional[float] = None
     extra: Dict[str, float] = field(default_factory=dict)
 
-    @property
-    def promoted(self) -> bool:
-        return self.verdict == PROMOTE
+    # There was a `promoted` property here, mirroring the one on gate.Decision. It had no
+    # caller. The gate's version is read by scripts/gate.py and by three checks, and this
+    # one existed because the two classes looked like they should match. A mutation pass
+    # flipped its comparison and nothing noticed, which is how it was found. The CLI reads
+    # `result.verdict == canary_mod.PROMOTE` directly, which is one fewer thing to keep
+    # in step with the four verdicts above.
 
 
 def _verdict_from(mean: float, lo: float, hi: float) -> Tuple[str, str]:
@@ -370,7 +373,23 @@ def decide(
                 control=control,
             )
 
-    split = split_interval(canary.row_losses, control.row_losses)
+    try:
+        split = split_interval(canary.row_losses, control.row_losses)
+    except CanaryError as exc:
+        # Every other way this function can fail to answer comes back as a refusal with a
+        # reason code, and this one used to come back as an exception through the caller.
+        # A canary at the start of a ramp really can have one request in an arm, so the
+        # first honest run of a real ramp would have ended in a traceback rather than in
+        # a verdict. Found by a check written for a mutant on the emptiness guard.
+        return CanaryResult(
+            verdict=REFUSE,
+            reason="too_few_requests",
+            detail=str(exc),
+            holdout=holdout,
+            fraction=fraction,
+            canary=canary,
+            control=control,
+        )
     verdict, reason = _verdict_from(*split)
 
     shadow = None

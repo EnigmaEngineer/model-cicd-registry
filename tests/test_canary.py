@@ -210,6 +210,23 @@ def check_split_interval_refuses_an_arm_of_fewer_than_two_rows():
         raise AssertionError("split_interval accepted a one row arm")
 
 
+def check_split_interval_accepts_an_arm_of_exactly_two_rows():
+    """The other side of the same limit, which is the side a mutant walks through.
+
+    A check that only ever hands the guard a one row arm passes against `< 3` and against
+    `<= 2` as well as against `< 2`, because one row is refused by all three. Two rows is
+    the smallest sample a variance exists for and it has to be allowed.
+    """
+    two = np.array([1.0, 3.0])
+    other = np.array([0.0, 1.0])
+    mean, lo, hi = canary.split_interval(two, other)
+    assert math.isfinite(lo) and math.isfinite(hi)
+    assert abs(mean - 1.5) < 1e-12, mean
+    # And both ways round, so a mutant moving only the control arm's limit is caught too.
+    mean2, _, _ = canary.split_interval(other, two)
+    assert abs(mean2 + 1.5) < 1e-12, mean2
+
+
 def check_shadow_interval_refuses_mismatched_lengths():
     try:
         canary.shadow_interval(np.zeros(10), np.zeros(11))
@@ -251,9 +268,10 @@ def check_required_rows_falls_as_the_square_of_the_half_width():
 
 
 def check_required_rows_is_symmetric_in_the_fraction_and_worst_at_a_half():
-    """The 1/(f*(1-f)) term. Its minimum is at an even split, which is the whole reason a
-    small canary is expensive, and it is symmetric, which a mutant writing 1/f alone
-    would break in both directions at once.
+    """The 1/(f*(1-f)) term, checked on both of its properties.
+
+    Its minimum is at an even split. That is the whole reason a small canary is expensive.
+    It is also symmetric, which a mutant writing 1/f alone breaks in both directions.
     """
     even = canary.required_rows(sd=0.5, half_width=1e-3, fraction=0.5)
     for f in (0.05, 0.2, 0.4):
@@ -315,6 +333,63 @@ def check_an_interval_touching_zero_is_a_hold():
     assert canary._verdict_from(1.0, 0.0, 2.0)[0] == canary.HOLD
 
 
+def check_an_empty_arm_is_not_finite():
+    """`finite()` guards on `n > 0` and every fixture had rows, so the limit was untested.
+
+    An empty arm has a NaN mean and `np.isfinite(...).all()` on an empty array is True, so
+    without the count term an arm that served nothing reports itself healthy and reaches
+    the interval. Same shape as a checker reporting clean on zero files.
+    """
+    empty = canary.ArmObservations(
+        canary.CANARY, "none", "aaa", np.array([]), np.array([])
+    )
+    assert not empty.finite()
+    assert not np.isfinite(empty.mean_loss)
+    one = canary.ArmObservations(
+        canary.CANARY, "one", "aaa", np.array([0.5]), np.array([1])
+    )
+    assert one.finite(), "an arm with a single finite row should be finite"
+
+
+def check_the_arm_dataclasses_are_frozen():
+    """Three frozen dataclasses here and nothing asserted any of them.
+
+    A result object that can be edited after the verdict is one a caller can talk itself
+    into adjusting, and the report would then describe something the decision did not.
+    """
+    import dataclasses
+
+    for cls in (canary.Router, canary.ArmObservations, canary.CanaryResult):
+        assert dataclasses.fields(cls) is not None
+        assert cls.__dataclass_params__.frozen, "{} is not frozen".format(cls.__name__)
+
+    arm = canary.ArmObservations(canary.CANARY, "n", "h", np.array([1.0]), np.array([1]))
+    try:
+        arm.name = canary.CONTROL
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("an ArmObservations accepted a write to name")
+
+
+def check_a_position_exactly_on_the_fraction_routes_to_control():
+    """The router's boundary, which no real key is likely to land on.
+
+    `_position` returns k over 2**64, so a position exactly equal to the fraction is
+    reachable and vanishingly rare, which means a `<` quietly becoming a `<=` would never
+    show up in traffic and would still be a changed rule. Forced here through a subclass
+    rather than hunting for a key that hashes to it.
+    """
+
+    class Fixed(canary.Router):
+        def _position(self, key):
+            return {"on": 0.25, "below": 0.25 - 1e-12, "above": 0.25 + 1e-12}[key]
+
+    r = Fixed(fraction=0.25)
+    assert r.arm("below") == canary.CANARY
+    assert r.arm("on") == canary.CONTROL, "a position equal to the fraction joined the slice"
+    assert r.arm("above") == canary.CONTROL
+
+
 def check_the_four_verdicts_are_distinct_strings():
     verdicts = (canary.PROMOTE, canary.ROLLBACK, canary.HOLD, canary.REFUSE)
     assert len(set(verdicts)) == 4, "two verdicts collide: {}".format(verdicts)
@@ -371,6 +446,19 @@ def check_observe_returns_no_pair_when_shadow_is_off():
     assert pair is None
 
 
+def check_observe_shadows_by_default():
+    """The default is the argument nothing passes, so nothing was checking it.
+
+    Every caller in this repo passes `shadow=` explicitly. A mutant flipping the default
+    to False turns the paired comparison off for anyone who does not, which is the case
+    this module most wants to be on.
+    """
+    import inspect
+
+    sig = inspect.signature(canary.observe)
+    assert sig.parameters["shadow"].default is True, sig.parameters["shadow"].default
+
+
 def check_observe_refuses_a_ragged_replay():
     spec = gate.spec_from_config(_cfg())
     x, y = spec.rows()
@@ -419,6 +507,65 @@ def check_observe_refuses_when_the_fraction_empties_an_arm():
     except canary.CanaryError:
         return
     raise AssertionError("observe routed every request to one arm and did not say so")
+
+
+def check_observe_allows_an_arm_of_exactly_one_request():
+    """The other side of the emptiness guard.
+
+    The guard refuses an arm of zero. A mutant moving it to one refuses an arm of one
+    instead, and every fixture has arms of hundreds so nothing noticed. One request is a
+    real canary at the start of a ramp. It is refused later by `split_interval`, which is
+    where a sample size rule belongs, and the message there says what is wrong.
+
+    Run both ways round. The guard has a term per arm and a fixture that only ever puts
+    the single request in the canary arm leaves the control arm's term untested.
+    """
+
+    class One(canary.Router):
+        """All but one request to the canary, or all but one to the control."""
+
+        def __init__(self, fraction, lonely):
+            object.__setattr__(self, "lonely", lonely)
+            super().__init__(fraction=fraction)
+
+        def assign(self, keys):
+            mask = np.zeros(len(keys), dtype=bool)
+            if self.lonely == canary.CANARY:
+                mask[0] = True
+            else:
+                mask[:] = True
+                mask[0] = False
+            return mask
+
+    spec = gate.spec_from_config(_cfg(n_rows=400))
+    x, y = spec.rows()
+    ra = train_mod.run(_cfg("a", n_rows=400, epochs=40))
+    rb = train_mod.run(_cfg("b", n_rows=400, epochs=4))
+
+    for lonely in (canary.CANARY, canary.CONTROL):
+        arm_can, arm_con, _pair = canary.observe(
+            router=One(0.5, lonely),
+            keys=canary.replay_keys(len(y)),
+            x=x,
+            y=y,
+            canary_payload=rb.artifact.payload,
+            control_payload=ra.artifact.payload,
+            canary_name="b",
+            control_name="a",
+            canary_hash=rb.content_hash,
+            control_hash=ra.content_hash,
+        )
+        small, large = (arm_can, arm_con) if lonely == canary.CANARY else (arm_con, arm_can)
+        assert small.n == 1, "{} arm has {} requests".format(lonely, small.n)
+        assert large.n == len(y) - 1
+
+        # And `decide` refuses rather than raising. It used to raise, which this check
+        # found. Every other failure here is a refusal with a reason code and a caller
+        # reads the verdict, so one path leaving by exception is one the CLI cannot see.
+        out = canary.decide(arm_can, arm_con, "fp", 0.5, None)
+        assert out.verdict == canary.REFUSE, out.verdict
+        assert out.reason == "too_few_requests", out.reason
+        assert "cannot build an interval" in out.detail, out.detail
 
 
 def check_decide_refuses_two_arms_running_the_same_bytes():
@@ -522,14 +669,23 @@ def check_slice_imbalance_reports_both_arms_and_their_gap():
     assert abs(can - float(y[mask].mean())) < 1e-12
 
 
-def check_slice_imbalance_refuses_an_empty_arm():
+def check_slice_imbalance_refuses_an_empty_arm_from_either_side():
+    """Both terms of the guard.
+
+    A fixture that only ever empties the canary arm leaves the control arm's term alone,
+    and a mutant on it survives. The second case is the one that happens in practice, when
+    somebody ramps a canary to everything and the control arm quietly disappears.
+    """
     keys = canary.replay_keys(200)
     values = np.arange(200, dtype=float)
-    try:
-        canary.slice_imbalance(canary.Router(fraction=1e-9), keys, values)
-    except canary.CanaryError:
-        return
-    raise AssertionError("slice_imbalance measured a gap against an empty arm")
+    for fraction in (1e-9, 1.0 - 1e-9):
+        try:
+            canary.slice_imbalance(canary.Router(fraction=fraction), keys, values)
+        except canary.CanaryError:
+            continue
+        raise AssertionError(
+            "slice_imbalance measured a gap against an empty arm at {}".format(fraction)
+        )
 
 
 # --- the report -------------------------------------------------------------------
@@ -578,10 +734,57 @@ def check_report_prints_a_nan_arm_as_nan_rather_than_a_dash():
     assert canary.REFUSE in text
 
 
-def check_report_prints_the_request_counts_for_both_arms():
+def check_report_prints_a_table_row_for_each_arm():
+    """Asserted against the table rows, not against the whole report.
+
+    The first version of this check looked for each arm's request count anywhere in the
+    text. A mutant that skipped every arm and printed no table at all survived it, because
+    the detail line further down also carries both counts. The check passed on a line it
+    was not about.
+    """
     arm_can, arm_con, pair, spec, y = _observed()
-    text = "\n".join(canary.report_lines(canary.decide(arm_can, arm_con, "fp", 0.2, pair)))
-    assert str(arm_can.n) in text and str(arm_con.n) in text
+    lines = canary.report_lines(canary.decide(arm_can, arm_con, "fp", 0.2, pair))
+    rows = [ln for ln in lines if ln.startswith(("canary ", "control "))]
+    assert len(rows) == 2, "expected one table row per arm, got {}: {}".format(
+        len(rows), rows
+    )
+    assert str(arm_con.n) in rows[0] and arm_con.model_name in rows[0], rows[0]
+    assert str(arm_can.n) in rows[1] and arm_can.model_name in rows[1], rows[1]
+
+
+def check_the_detail_line_quotes_the_mean_the_verdict_came_from():
+    """A detail reading an end of the interval instead of the middle still looks fine."""
+    arm_can, arm_con, pair, spec, y = _observed()
+    out = canary.decide(arm_can, arm_con, "fp", 0.2, pair)
+    assert "{:+.6e}".format(out.split[0]) in out.detail, out.detail
+    assert "{:+.6e}".format(out.split[1]) in out.detail
+    assert "{:+.6e}".format(out.split[2]) in out.detail
+    # The three are distinct, so a detail quoting one of them twice is a real difference
+    # rather than something the fixture hides.
+    assert len({out.split[0], out.split[1], out.split[2]}) == 3
+
+
+def check_report_works_when_there_is_no_shadow_to_report():
+    """The `--no-shadow` path, which has a split and no pair.
+
+    The footer comparing the two verdicts guards on both being present. A mutant turning
+    that `and` into an `or` reaches for `result.shadow` when it is None, and no check hit
+    that combination until this one, because every refusal fixture had neither.
+    """
+    arm_can, arm_con, _pair, spec, y = _observed(shadow=False)
+    out = canary.decide(arm_can, arm_con, "fp", 0.2, None)
+    assert out.split is not None and out.shadow is None
+    text = "\n".join(canary.report_lines(out))
+    assert "split   (served)" in text
+    assert "shadow" not in text
+    assert "times wider" not in text, "reported a ratio with nothing to compare against"
+
+
+def check_num_prints_a_missing_value_and_a_nan_differently():
+    """Directly, because both branches are one line and the report reaches neither."""
+    assert canary._num(None) == "-"
+    assert canary._num(float("nan")) == "nan"
+    assert canary._num(1.5) == "1.500000"
 
 
 # --- the CLI contract -------------------------------------------------------------

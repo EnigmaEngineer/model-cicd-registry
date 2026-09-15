@@ -53,8 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--fraction",
         type=float,
-        default=DEFAULT_FRACTION,
-        help="share of request keys routed to the canary arm",
+        default=None,
+        help="share of request keys routed to the canary arm. Defaults to the share the "
+        "registry recorded when the canary was opened, and passing a different one is "
+        "refused rather than silently believed",
     )
     p.add_argument("--salt", default="canary", help="changes which keys land in the slice")
     p.add_argument(
@@ -91,15 +93,37 @@ def main(argv=None) -> int:
     import mlflow
 
     from mcr import canary as canary_mod
-    from mcr import gate, registry, tracking
+    from mcr import deploy, gate, registry, tracking
     from mcr.config import load
 
     cli = mlflow.MlflowClient(tracking_uri=args.store, registry_uri=args.store)
     spec = gate.spec_from_config(load(args.holdout))
     fp = spec.fingerprint()
 
+    # The share used to be a flag and only a flag, so the number this script measured had
+    # no connection to anything the store believed. Now the registry holds it and the flag
+    # is a way to ask for something else, which is refused rather than taken. Reading a
+    # split at a fraction nobody deployed is a measurement of an imaginary deployment.
     try:
-        router = canary_mod.Router(fraction=args.fraction, salt=args.salt)
+        recorded = deploy.deployment(cli, args.model).fraction
+    except deploy.DeployError as exc:
+        print("refused: {}".format(exc), file=sys.stderr)
+        return EXIT_REFUSE
+
+    if args.fraction is None:
+        fraction = recorded if recorded is not None else DEFAULT_FRACTION
+    elif recorded is not None and args.fraction != recorded:
+        print(
+            "refused: --fraction {} does not match the {} the registry recorded when this "
+            "canary was opened".format(args.fraction, recorded),
+            file=sys.stderr,
+        )
+        return EXIT_REFUSE
+    else:
+        fraction = args.fraction
+
+    try:
+        router = canary_mod.Router(fraction=fraction, salt=args.salt)
     except canary_mod.CanaryError as exc:
         print("refused: {}".format(exc), file=sys.stderr)
         return EXIT_REFUSE
@@ -154,7 +178,7 @@ def main(argv=None) -> int:
         print("refused: {}".format(exc), file=sys.stderr)
         return EXIT_REFUSE
 
-    result = canary_mod.decide(arm_can, arm_con, fp, args.fraction, pair)
+    result = canary_mod.decide(arm_can, arm_con, fp, fraction, pair)
 
     print("canary       version {} of {}".format(canary_version, args.model))
     print("control      version {}, holding {}".format(held, args.stage))
@@ -194,16 +218,17 @@ def main(argv=None) -> int:
         # It reads as the obvious safety action and it is a change to the one thing that
         # was working.
         #
-        # What a rollback verdict really means here is stop routing traffic to the canary,
-        # and the canary's share is a command line flag rather than registry state, so
-        # there is nothing in the registry to undo. The exit code is the action. Making
-        # the canary's share into registry state is a later change and docs/adr-0005
-        # says so.
+        # What a rollback verdict means is stop routing traffic to the canary. That used to
+        # be a sentence and nothing else, because the share was a flag and there was
+        # nothing in the store to undo. The canary is a stage now, so the action exists and
+        # it is `deploy.py abort`. This script still does not take it. A script that reads
+        # a verdict and a script that changes what is deployed are two jobs, and the exit
+        # code is what joins them in docs/adr-0006.
         print("")
         print(
-            "stop routing to the canary. Nothing in the registry changes, because the "
-            "canary's share is a flag rather than a stage, and {} still holds {}.".format(
-                held, args.stage
+            "stop routing to the canary. Run `scripts/deploy.py abort` to take version {} "
+            "off traffic. {} keeps {} either way.".format(
+                canary_version, held, args.stage
             )
         )
 

@@ -158,8 +158,11 @@ def check_nothing_on_the_core_training_path_needs_an_optional_package():
     allowed = {
         "mcr/tracking.py",
         "mcr/registry.py",
+        "mcr/deploy.py",
         "tests/test_registry.py",
+        "tests/test_deploy.py",
         "scripts/registry_probe.py",
+        "scripts/drill.py",
     }
     used_the_exemption = set()
     guarded = 0
@@ -210,3 +213,43 @@ def check_the_core_requirements_are_importable():
 
     for name in sorted(_declared_in(os.path.join(ROOT, CORE))):
         importlib.import_module(name)
+
+
+def check_the_narrow_registry_runner_covers_everything_that_could_kill_a_mutant():
+    """A mutation oracle that misses a module reports survivors that are not survivors.
+
+    tests/run_registry_checks.py exists because the full store runner is too slow to use as
+    an oracle inside one shell call. Narrowing an oracle is only sound while no check
+    outside it executes the module under test, so that is checked here rather than trusted.
+
+    The list in that runner is hand written and this derives the answer from the imports,
+    so the two have different sources and can therefore disagree.
+    """
+    sys.path.insert(0, ROOT)
+    from tests.run_registry_checks import COVERS, MODULES
+
+    covered_modules = {c[: -len(".py")].replace("/", ".") for c in COVERS}
+
+    importers = set()
+    for path in _source_files():
+        rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
+        if not rel.startswith("tests/") or not rel.startswith("tests/test_"):
+            continue
+        names = _top_level_imports(path)
+        if "mcr" not in names:
+            continue
+        with open(path, "r", encoding="utf-8") as fh:
+            body = fh.read()
+        for mod in covered_modules:
+            leaf = mod.split(".")[-1]
+            if "import {}".format(leaf) in body or "{}.".format(leaf) in body:
+                importers.add(rel[: -len(".py")].replace("/", "."))
+
+    assert importers, "no check module touches {}, so this check is reading nothing".format(
+        COVERS
+    )
+    missing = sorted(importers - set(MODULES))
+    assert not missing, (
+        "tests/run_registry_checks.py is used as a mutation oracle for {} and these check "
+        "modules touch those and are not in its list: {}".format(COVERS, missing)
+    )

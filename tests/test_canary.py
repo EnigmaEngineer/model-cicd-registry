@@ -692,7 +692,7 @@ def check_slice_imbalance_refuses_an_empty_arm_from_either_side():
 
 
 def check_report_names_the_traffic_as_a_replay():
-    """The 07-31 rule, at the point of use.
+    """A number measured on generated data says so where it is used.
 
     A reader meeting these numbers in a report should not have to find a limitations
     section to learn there is no production traffic behind them.

@@ -4,6 +4,7 @@
     python3 scripts/registry.py --store sqlite:///mlflow.db promote 3 production
     python3 scripts/registry.py --store sqlite:///mlflow.db history production
     python3 scripts/registry.py --store sqlite:///mlflow.db rollback production
+    python3 scripts/registry.py --store sqlite:///mlflow.db report 2
 
 `rollback` is the one command the project promises. It reads the transition log, finds what
 production held before whatever it holds now, and points production back at it. It refuses
@@ -42,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("rollback", help="put a stage back on the version it held before")
     p.add_argument("stage")
+
+    p = sub.add_parser("report", help="the gate's last verdict on one version")
+    p.add_argument("ref", help="a version number or the stage that currently holds it")
 
     return parser
 
@@ -110,6 +114,22 @@ def main(argv=None) -> int:
         if args.command == "rollback":
             entry = registry.rollback(cli, args.model, args.stage)
             print("{}: rolled back to version {}".format(args.stage, entry.to_version))
+            return 0
+
+        if args.command == "report":
+            version = registry.resolve(cli, args.model, args.ref)
+            run_id = cli.get_model_version(args.model, str(version)).run_id
+            tags = {
+                k: v for k, v in cli.get_run(run_id).data.tags.items()
+                if k.startswith("gate.")
+            }
+            if not tags:
+                # Not an error. A version nothing has gated yet is the normal state of a
+                # freshly registered model, and saying so beats printing an empty block.
+                print("version {} has never been gated".format(version))
+                return 0
+            for key in sorted(tags):
+                print("{} = {}".format(key, tags[key]))
             return 0
     except registry.RegistryError as exc:
         print("refused: {}".format(exc), file=sys.stderr)

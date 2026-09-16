@@ -215,6 +215,53 @@ def check_the_core_requirements_are_importable():
         importlib.import_module(name)
 
 
+def _binds_and_uses(path, covered_modules):
+    """Does this file import one of `covered_modules` and then actually use the name.
+
+    This was a substring grep, looking for `registry.` in the file body. It
+    was wrong in both directions. It matched an assert message that merely named
+    `registry.promote`, which is how it first fired on a file with no such import, and it
+    would have missed `from mcr import registry as reg` entirely, because the alias is
+    never spelled the way the grep spells it.
+
+    An import that is never used does not execute the module, so binding alone is not
+    enough and the use has to be found too.
+    """
+    import ast
+
+    with open(path, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    leaves = {mod.split(".")[-1] for mod in covered_modules}
+    aliases = set()
+    direct = False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "mcr":
+                for alias in node.names:
+                    if alias.name in leaves:
+                        aliases.add(alias.asname or alias.name)
+            elif node.module and node.module.split(".")[-1] in leaves:
+                # from mcr.registry import promote. The symbol is the module's own code.
+                if node.module.startswith("mcr."):
+                    direct = True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("mcr.") and alias.name.split(".")[-1] in leaves:
+                    # import mcr.registry binds `mcr`, so the use shows up as an attribute.
+                    aliases.add(alias.asname or "mcr")
+
+    if direct:
+        return True
+    if not aliases:
+        return False
+    return any(
+        isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in aliases
+        for node in ast.walk(tree)
+    )
+
+
 def check_the_narrow_registry_runner_covers_everything_that_could_kill_a_mutant():
     """A mutation oracle that misses a module reports survivors that are not survivors.
 
@@ -238,12 +285,8 @@ def check_the_narrow_registry_runner_covers_everything_that_could_kill_a_mutant(
         names = _top_level_imports(path)
         if "mcr" not in names:
             continue
-        with open(path, "r", encoding="utf-8") as fh:
-            body = fh.read()
-        for mod in covered_modules:
-            leaf = mod.split(".")[-1]
-            if "import {}".format(leaf) in body or "{}.".format(leaf) in body:
-                importers.add(rel[: -len(".py")].replace("/", "."))
+        if _binds_and_uses(path, covered_modules):
+            importers.add(rel[: -len(".py")].replace("/", "."))
 
     assert importers, "no check module touches {}, so this check is reading nothing".format(
         COVERS
@@ -253,3 +296,51 @@ def check_the_narrow_registry_runner_covers_everything_that_could_kill_a_mutant(
         "tests/run_registry_checks.py is used as a mutation oracle for {} and these check "
         "modules touch those and are not in its list: {}".format(COVERS, missing)
     )
+
+
+def check_the_oracle_coverage_reader_separates_a_real_import_from_a_mention():
+    """A control on `_binds_and_uses`, because it replaced a grep that fired wrongly.
+
+    Four cases with a known answer. Two of them are the exact failures of the substring
+    version it replaced: a prose mention that matched, and an aliased import that did not.
+    Without this, loosening the reader until nothing fails would look like a pass.
+    """
+    import tempfile
+    import textwrap
+
+    cases = [
+        (False, "only names it in a message", '''
+            from mcr import gate
+            def check_x():
+                assert gate.PROMOTE, "registry.promote moves the stage"
+        '''),
+        (True, "imports and uses it", '''
+            from mcr import registry
+            def check_x():
+                assert registry.STAGES
+        '''),
+        (True, "imports it under another name", '''
+            from mcr import registry as reg
+            def check_x():
+                assert reg.STAGES
+        '''),
+        (False, "imports it and never uses it", '''
+            from mcr import registry
+            def check_x():
+                assert True
+        '''),
+        (True, "imports a symbol straight out of it", '''
+            from mcr.deploy import Deployment
+            def check_x():
+                assert Deployment
+        '''),
+    ]
+
+    covered = {"mcr.registry", "mcr.deploy"}
+    with tempfile.TemporaryDirectory() as tmp:
+        for want, label, body in cases:
+            path = os.path.join(tmp, "case.py")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(textwrap.dedent(body))
+            got = _binds_and_uses(path, covered)
+            assert got is want, "{}: wanted {} and got {}".format(label, want, got)

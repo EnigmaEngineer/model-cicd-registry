@@ -366,3 +366,57 @@ def check_every_adr_the_readme_names_actually_exists():
     assert named, "the README names no adr at all, so this check reads nothing"
     dangling = sorted(named - present)
     assert not dangling, "the README points at adrs that do not exist: {}".format(dangling)
+
+
+def check_the_canary_has_an_incumbent_to_compare_against():
+    """The defect that took the first real execution of this workflow.
+
+    `deploy.py open` refuses twice over, and both refusals are correct. With nothing in
+    production there is no control arm. With the candidate already promoted into production
+    there is only a model against itself. The runner starts with an empty workspace, so the
+    store is new on every run and neither condition fixes itself.
+
+    Every static check passed on the broken version, because each command was spelled
+    correctly and every exit code was reachable. What none of them read was the state the
+    commands leave for each other. This one reads exactly that and nothing else.
+
+    It is deliberately narrow. It does not simulate the job. It asserts the two things that
+    have to be true before an `open` can succeed, and the second one is an absence.
+    """
+    text = _text()
+
+    deploy = text[text.index("\n  deploy:"):]
+
+    # Comments in this job quote the very commands being checked for, because they explain
+    # the failure that produced the check. Reading them as commands would mean a deleted
+    # step still passes while its explanation survives. Same defect as the substring oracle
+    # guard in tests/test_deps.py, found the same day, so it does not get shipped twice.
+    ran = "\n".join(
+        line for line in deploy.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert "deploy.py open" in ran, "the deploy job no longer opens a canary"
+    deploy = ran
+
+    # One. Something must reach production before the canary opens.
+    seed = re.search(r"promote\s+\S+\s+production", deploy)
+    assert seed, (
+        "nothing in the deploy job puts a version into production before "
+        "`deploy.py open`, so the canary has no control arm on a fresh store"
+    )
+    assert deploy.index(seed.group(0)) < deploy.index("deploy.py open"), (
+        "production is seeded after the canary opens, which is too late"
+    )
+
+    # Two. The gate must not promote, or the canary gets the version it just promoted.
+    gate_step = deploy[deploy.index("scripts/gate.py"):]
+    gate_cmd = gate_step[: gate_step.index("code=$?")]
+    assert "--promote" not in gate_cmd, (
+        "the deploy job's gate passes --promote, which moves production before the canary "
+        "runs and leaves `deploy.py open` canarying the version it just promoted"
+    )
+
+    # And the thing that does move production has to still be there.
+    assert "deploy.py land" in deploy, (
+        "nothing lands the canary, so a promoted candidate never reaches production"
+    )

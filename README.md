@@ -322,21 +322,51 @@ production before removing the canary alias, so a crash leaves both aliases on o
 `check_consistency` names each state in a sentence and `abort_canary` is the repair for
 both, without moving production in either case.
 
-## CI, and a check on a workflow that has never run
+## CI, and what three static checks could not see
 
 `.github/workflows/ci.yml` takes a merge through the suite and the drills and the probes.
-What survives that reaches the gate and then the canary. It has never executed. There is no GitHub runner in the environment this was
-built in, so it is a description of intended wiring and not a green build.
+What survives that reaches the gate and then the canary.
 
-What can be checked without a runner is narrower. A step can name a script that was renamed,
-pass arguments the script refuses, or branch on an exit code the script cannot return.
-`tests/test_workflow.py` reads the file and checks all three on every commit.
+There was no GitHub runner in the environment this was built in, so for six days the file
+was checked rather than executed. A step can name a script that was renamed, pass arguments
+the script refuses, or branch on an exit code the script cannot return. `tests/test_workflow.py`
+reads the file and checks all three on every commit.
 
 The argument check exists because the first two were not enough. They passed on a workflow
 whose opening deploy step called `scripts/train.py --store` against a script that takes
 `--track`, with a bare `--register` against a flag that needs a value. Neither would have
 run. So every `python3 scripts/X.py ...` in the workflow is now handed to `X.build_parser()`
 and really parsed.
+
+**Then it ran, and the deploy job failed.** All three checks still passed on the file that
+failed, and they were right to. Every script existed, every command parsed, every branch was
+reachable. What none of them read is the state each command leaves for the next one.
+
+The runner starts with an empty workspace, so the store is a new database on every run and
+there is never an incumbent. The job trained one model into that empty store, let the gate
+promote it, then tried to canary it. `deploy.py open` refused, because the version it was
+asked to canary was the version now in production, which compares a model against itself.
+Removing the promote does not help either. With nothing in production the canary has no
+control arm and the same command refuses for the opposite reason.
+
+Both refusals are correct. The code was right and the pipeline was impossible.
+
+```
+before   train -> gate --promote -> open canary    refused, model against itself
+after    seed an incumbent -> train -> gate -> open canary -> read -> land
+```
+
+The incumbent is now seeded on purpose and labelled as seeded, an underfit model put into
+production so the candidate has something real to beat, and the gate no longer passes
+`--promote` because `deploy.py land` is what moves production after the canary reads.
+
+The check added for it asserts the two conditions an `open` needs, and one of them is an
+absence. Its control is the exact file that failed on the runner.
+
+The honest summary is that a check on an artefact it cannot execute reads names and
+constants, because those are what an author gets wrong from memory. A sequence of
+individually correct commands that cannot happen in order is a different kind of wrong, and
+it took a real runner to find it.
 
 ## What the rollback changed, and what it did not
 
@@ -782,10 +812,16 @@ drilled is the state machine, which is the half that exists.
 `promote` by hand rather than killing a process mid write. That is a faithful model of the
 state a crash leaves behind and it is not the same thing.
 
-**The CI workflow has never run.** `.github/workflows/ci.yml` describes the wiring and there
-is no runner here to execute it. `tests/test_workflow.py` checks that every script it names
-exists, that every command it issues parses against that script's own parser, and that every
-exit code it branches on is one the script can return. All three are checks on a file.
+**The CI workflow's deploy job proves the wiring and not the deployment.** It ran for the
+first time on 2026-09-16 and failed, and the fix is above. It passes now, but what it
+exercises is a store seeded inside the same job and torn down with the runner. Nothing here
+has ever deployed anything that outlived a build. A real pipeline's incumbent is whatever
+last shipped, and this one's incumbent is a model trained ninety seconds earlier for the
+purpose.
+
+**Four checks read that workflow and a fifth thing broke it.** The four are worth having and
+none of them could see a sequence of correct commands that cannot happen in order. Assume
+the fifth kind exists again.
 
 **A crash between the alias move and the log write is not recoverable.** `settle` recovers
 the other order by dropping an entry the store cannot confirm. This one leaves the version

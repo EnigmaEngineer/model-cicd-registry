@@ -4,12 +4,16 @@ name: train, gate, canary
 # and canaries it if it does. Every decision is an exit code rather than a log line that a
 # later step greps, because a grep over stdout passes on a run that printed nothing.
 #
-# Nothing here has ever executed. There is no GitHub runner in the environment this repo was
-# built in, so treat the file as a description of the intended wiring and not as a green
-# build. What is checked is narrower and it is checked on every commit: tests/test_workflow.py
-# reads this file and fails when it names a script the repo does not have, or branches on an
-# exit code the script cannot return. Those are the two ways a workflow rots without anybody
-# noticing, and both are catchable without a runner.
+# This file ran for the first time on 2026-09-16 and the deploy job failed, after six days
+# of passing every static check written for it. tests/test_workflow.py reads the file and
+# fails when it names a script the repo does not have, when a command does not parse against
+# that script's own parser, or when a step branches on an exit code the script cannot return.
+# All of those passed. None of them can see that the SEQUENCE of correct commands describes
+# something the runner cannot produce, which is what was actually wrong. See the deploy job.
+#
+# The lesson is worth more than the fix. A check on a file it cannot execute reads names and
+# constants, because names and constants are what an author gets wrong from memory. It does
+# not read the state the commands leave behind for each other.
 
 on:
   push:
@@ -86,6 +90,22 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-tracking.txt
 
+      # The runner gets an empty workspace, so MCR_STORE is a new database on every run and
+      # there is never an incumbent to compare against. The first version of this job trained
+      # one model into that empty store and went straight to the canary, which cannot work:
+      # with nothing in production the canary has no control arm, and if the gate has already
+      # moved production onto the only version there is, the canary is that version against
+      # itself. Both refusals are correct and the job failed on the second one.
+      #
+      # So the incumbent is seeded on purpose and labelled as seeded. An underfit model goes
+      # into production first, and the candidate then has something real to beat.
+      - name: seed the incumbent
+        run: |
+          python3 scripts/train.py configs/candidate-underfit.yml \
+            --track "$MCR_STORE" --register "$MCR_MODEL"
+          python3 scripts/registry.py --store "$MCR_STORE" --model "$MCR_MODEL" \
+            promote latest production
+
       - name: train the candidate
         run: python3 scripts/train.py configs/baseline.yml --track "$MCR_STORE" --register "$MCR_MODEL"
 
@@ -93,12 +113,16 @@ jobs:
       # the job treats them differently on purpose. A rejected candidate is the gate working
       # and the build is green. A refusal means the gate could not answer, which is a broken
       # build rather than a verdict.
+      #
+      # No --promote here. The gate decides and the canary is what moves production, through
+      # `deploy.py land`. Passing --promote moved the stage before the canary ever ran, which
+      # left nothing for the canary to do and is what broke the first execution of this file.
       - name: promotion gate
         id: gate
         run: |
           set +e
           python3 scripts/gate.py --store "$MCR_STORE" --model "$MCR_MODEL" \
-            --candidate latest --stage production --promote
+            --candidate latest --stage production
           code=$?
           set -e
           echo "verdict=$code" >> "$GITHUB_OUTPUT"

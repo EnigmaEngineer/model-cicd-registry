@@ -755,3 +755,128 @@ def check_the_inverted_config_is_finite_and_worse_than_a_coin():
     assert all(math.isfinite(v) for v in result.metrics.values())
     assert result.metrics["holdout_roc_auc"] < 0.5
     assert warned == ["overflow encountered in matmul"], warned
+
+
+def _gate_cli():
+    """Load scripts/gate.py as a module. It imports mlflow inside main, so this is cheap."""
+    import importlib.util
+
+    path = os.path.join(ROOT, "scripts", "gate.py")
+    spec_ = importlib.util.spec_from_file_location("gate_cli", path)
+    mod = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(mod)
+    return mod, path
+
+
+def _enclosing_if_tests(tree, target):
+    """Every `if` test that the target node sits underneath, innermost last."""
+    import ast
+
+    found = []
+
+    def walk(node, stack):
+        if node is target:
+            found.append(list(stack))
+            return
+        for child in ast.iter_child_nodes(node):
+            if isinstance(node, ast.If) and child in node.body:
+                walk(child, stack + [node.test])
+            else:
+                walk(child, stack)
+
+    walk(tree, [])
+    return found[0] if found else None
+
+
+def check_the_gate_writes_its_verdict_without_being_asked_to_promote():
+    """The rejection you want to read back later is the one nobody asked to promote.
+
+    This sat inside the `--promote` branch, which meant a plain
+    `gate.py --candidate 2` printed a rejection and left the run with no `gate.*` tag on
+    it at all. Measured: nine tags with the flag, zero without. The only verdicts on
+    record were the ones from a run that expected to win.
+
+    By AST rather than by substring, because the comment above the call names `--promote`
+    and a grep would match it.
+    """
+    import ast
+
+    _mod, path = _gate_cli()
+    tree = ast.parse(open(path).read())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "set_tag"
+    ]
+    assert len(calls) == 1, "expected one set_tag call, found {}".format(len(calls))
+
+    tests = _enclosing_if_tests(tree, calls[0])
+    assert tests is not None, "could not locate the set_tag call in the tree"
+    sources = [ast.dump(t) for t in tests]
+    assert not any("promote" in s for s in sources), (
+        "the report write is still gated on --promote at line {}".format(calls[0].lineno)
+    )
+
+
+def check_promote_still_guards_the_stage_move():
+    """The other half. Loosening the report must not loosen the thing that moves production.
+
+    Without this, deleting the `--promote` test entirely would satisfy the check above.
+    """
+    import ast
+
+    _mod, path = _gate_cli()
+    tree = ast.parse(open(path).read())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "promote"
+    ]
+    assert len(calls) == 1, "expected one registry.promote call, found {}".format(len(calls))
+
+    tests = _enclosing_if_tests(tree, calls[0])
+    sources = [ast.dump(t) for t in tests or []]
+    assert any("promote" in s for s in sources), (
+        "the stage move at line {} is no longer behind --promote".format(calls[0].lineno)
+    )
+
+
+def check_there_is_a_way_to_compare_without_touching_the_store():
+    """Writing by default is only defensible if reading without writing stays possible."""
+    mod, _path = _gate_cli()
+    help_text = mod.build_parser().format_help()
+    assert "--no-report" in help_text, help_text
+    args = mod.build_parser().parse_args(
+        ["--store", "sqlite:///x.db", "--candidate", "2", "--no-report"]
+    )
+    assert args.no_report is True
+    assert args.promote is False
+
+
+def check_the_promote_flag_no_longer_advertises_writing_the_report():
+    """The help text said --promote wrote the report. It was true and it is not now."""
+    mod, _path = _gate_cli()
+    help_text = mod.build_parser().format_help()
+    promote_line = [line for line in help_text.splitlines() if "move the stage" in line]
+    assert promote_line, help_text
+    assert "report" not in promote_line[0], promote_line[0]
+
+
+def check_a_rejection_report_carries_the_reason_and_not_only_the_verdict():
+    """A tag saying `reject` with no reason is a verdict nobody can act on."""
+    mod, _path = _gate_cli()
+    inc = _hand("inc", np.full(200, 0.40))
+    cand = _hand("cand", np.full(200, 0.60))
+    decision = gate.decide(cand, inc, "fp123456")
+    assert decision.verdict == gate.REJECT, decision.verdict
+
+    tags = mod.report_tags(decision, "production")
+    assert tags["gate.verdict"] == gate.REJECT
+    assert tags["gate.reason"] == decision.reason
+    assert tags["gate.holdout"] == "fp123456"
+    # Round trip, so a tag holding a truncated float is caught here and not by a reader.
+    assert eval(tags["gate.mean_diff"]) == decision.mean_diff

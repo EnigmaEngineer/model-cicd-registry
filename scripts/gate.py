@@ -14,6 +14,11 @@ One and two are different on purpose. A reject is a fact about the candidate. A 
 fact about the gate's inputs, and a pipeline that treats them the same will retry a broken
 incumbent forever.
 
+Every comparison writes its verdict back to the candidate's run as `gate.*` tags. That is
+the audit record, and it is the default because the verdicts worth reading later are mostly
+the rejections. `--promote` moves the stage and does nothing else. `--no-report` compares
+without writing, for when the store must not be touched.
+
 Both models are scored on one holdout, which this script builds. It does not read the
 metrics the runs recorded, because those were measured on whatever corpus each run
 generated for itself. Those numbers are still printed, in the right hand column, so the
@@ -53,7 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--promote",
         action="store_true",
-        help="move the stage when the verdict is promote, and write the report to the run",
+        help="move the stage when the verdict is promote",
+    )
+    p.add_argument(
+        "--no-report",
+        action="store_true",
+        help="compare without writing the verdict back to the candidate's run",
     )
     return p
 
@@ -118,20 +128,22 @@ def main(argv=None) -> int:
     for line in gate.report_lines(decision):
         print(line)
 
-    if args.promote:
-        # The report goes on the candidate's run whatever the verdict. A rejection that
-        # leaves no trace on the run is a rejection nobody can audit later.
+    if not args.no_report:
+        # Every comparison lands on the candidate's run, not only the ones somebody asked
+        # to promote. This used to sit inside the --promote branch, which meant the only
+        # verdicts on record were the ones from a run that expected to win. A rejection
+        # leaving no trace is the rejection you most want to read back six weeks later.
         run_id = cli.get_model_version(args.model, str(cand_version)).run_id
         for key, value in report_tags(decision, args.stage).items():
             cli.set_tag(run_id, key, value)
 
-        if decision.promoted:
-            entry = registry.promote(cli, args.model, str(cand_version), args.stage)
-            print("")
-            print("{}: {} -> {}".format(
-                args.stage,
-                entry.from_version if entry.from_version is not None else "nothing",
-                entry.to_version))
+    if args.promote and decision.promoted:
+        entry = registry.promote(cli, args.model, str(cand_version), args.stage)
+        print("")
+        print("{}: {} -> {}".format(
+            args.stage,
+            entry.from_version if entry.from_version is not None else "nothing",
+            entry.to_version))
 
     if decision.verdict == gate.PROMOTE:
         return EXIT_PROMOTE

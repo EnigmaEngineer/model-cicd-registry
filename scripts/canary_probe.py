@@ -292,7 +292,10 @@ def section_floor(bad):
     print("  trivial ones, and on this board the split at 5% scores {} against {} for".format(
         scores["split at 5%"], scores["rollback everything"]))
     print("  rolling everything back without looking at anything.")
-    print("  {} cases is a small board and the README says so.".format(len(truth)))
+    print("  {} cases is a small board. This is a sanity check on the key and it is".format(
+        len(truth)))
+    print("  deliberately not quoted in the README, because a board graded against a rule")
+    print("  I chose is not evidence. The table above it is, and that one is published.")
     best_trivial = max(scores[k] for k in always)
     if scores["split at 5%"] > best_trivial:
         print("  On this run the split beat every trivial answer, which it does not always do.")

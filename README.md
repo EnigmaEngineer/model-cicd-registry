@@ -67,9 +67,13 @@ And the gate sits in front of it.
 
 ```
 python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 2
+python3 scripts/registry.py --store sqlite:///mlflow.db report 2
 python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 2 --promote
 python3 scripts/gate_probe.py
 ```
+
+Every comparison writes its verdict onto the candidate's run, whether or not anybody asked
+to promote it. `report` reads it back. `--no-report` is the way to compare without writing.
 
 And the canary sits behind it. Opening one is a change to the registry, not a flag on a
 command, so the share survives the process that set it.
@@ -128,8 +132,8 @@ mcr/canary.py     routing a slice of traffic, and the two comparisons that gives
 mcr/deploy.py     what is deployed. production, the canary on trial, and the share it takes
 ```
 
-Ten entry points in `scripts/`. Three runners in `tests/`, carrying 200 checks without
-MLflow and 304 with it. The third runner covers the registry and deployment modules only,
+Eleven entry points in `scripts/`. Three runners in `tests/`, carrying 208 checks without
+MLflow and 312 with it. The third runner covers the registry and deployment modules only,
 at 15.4 seconds against 28.6 for the full store suite, which is what a mutation pass over
 those two modules needs to fit inside one shell invocation.
 
@@ -280,6 +284,9 @@ the move is unrecoverable.
 This came out of `scripts/drill.py`, which is thirteen drills over states a crash really
 produces. Each one carries a control that has to come back healthy, because a drill whose
 control also reports the failure has proved nothing about the damage.
+
+`docs/adr-0006` is the full argument, including the orders that stay unrecoverable and why
+the witness rule is a recovery mechanism rather than a defence against a forged entry.
 
 ## Opening a canary is a change to the registry
 
@@ -432,6 +439,55 @@ exit=1
 Exit codes carry the verdict. 0 promote, 1 reject, 2 refuse. The last two are different on
 purpose and the next section is why.
 
+### The rejection has to land somewhere
+
+An exit code lives as long as the shell that read it. The comparison above is the thing
+somebody asks about six weeks later, usually in the form "why is this model not in
+production yet", so it is written back to the run that produced the candidate.
+
+```
+$ python3 scripts/registry.py --store sqlite:///mlflow.db report 2
+version 2 has never been gated
+
+$ python3 scripts/gate.py --store sqlite:///mlflow.db --candidate 2
+... the comparison above, exit 1 ...
+
+$ python3 scripts/registry.py --store sqlite:///mlflow.db report 2
+gate.candidate_score = 0.64187146762992
+gate.holdout = 56ab7ecf5a6b
+gate.incumbent_score = 0.44923865033232196
+gate.interval = 0.17801190162342817,0.20725373297176775
+gate.mean_diff = 0.19263281729759796
+gate.metric = log_loss
+gate.reason = worse
+gate.stage = production
+gate.verdict = reject
+```
+
+Nine tags, and the command that wrote them passed no flags. `report` is the read side and
+it says "never been gated" rather than printing nothing, because an empty block and a
+missing feature look identical. That is a recent change and the thing it replaced is the
+more interesting half.
+
+Until today the write sat inside the `--promote` branch, under a comment reading "a
+rejection that leaves no trace on the run is a rejection nobody can audit later". The
+comment was right and it was describing the wrong branch. `--promote` means move the stage
+on a win, so it is the flag you pass when you expect to succeed. Every rejection that came
+from somebody merely checking left nothing behind. Measured on a clean store: nine tags
+with the flag and zero without.
+
+The effect is a store whose audit trail is biased toward wins, which is the opposite of
+what an audit trail is for. Full scores are boring. The rejections are the record.
+
+So the two concerns are separate now. Writing the report is what a comparison does.
+`--promote` moves the stage and nothing else. `--no-report` compares without touching the
+store, for a pipeline that must not write.
+
+Tags rather than params, because a run is written before it is ever gated and a param
+refuses a rewrite. A candidate can be gated more than once against different incumbents,
+and the latest verdict is the one worth reading off the run. The cost is that the earlier
+ones are gone, which is in the limitations.
+
 ## The comparison that is False in both directions
 
 `configs/candidate-diverged.yml` trains to a NaN. `l2: 100` overflows and training does not
@@ -468,8 +524,15 @@ exit=2
 
 `configs/candidate-inverted.yml` is the harder one. `l2: 10` does not diverge. Holdout AUC
 comes back at 0.377109, which is worse than a coin. Log loss is 19.701270. Every metric is
-finite and nothing about their shape is wrong. It puts 204 bytes of RuntimeWarning on
-stderr and exits 0, and nothing reads exit code zero and then goes hunting through stderr.
+finite and nothing about their shape is wrong. It puts one `RuntimeWarning` on stderr,
+`overflow encountered in matmul`, and exits 0. Nothing reads exit code zero and then goes
+hunting through stderr.
+
+This paragraph used to give the size of that warning in bytes. The completion pass could
+not reproduce the number and the reason is worth keeping. A warning carries the absolute
+path of the file that raised it, so the byte count is the length of wherever you cloned
+the repo plus 139. It read like a fact about the model and it was a fact about my
+filesystem. See `docs/adr-0008`.
 
 ## What the gate scores, and what doing nothing scores
 
@@ -728,6 +791,23 @@ exit code it branches on is one the script can return. All three are checks on a
 the other order by dropping an entry the store cannot confirm. This one leaves the version
 that served absent from the log entirely, and the direction of the move with it, so
 `rollback_target` refuses. The refusal names what it found and there is no repair.
+
+**The gate records its latest verdict on a run and not its earlier ones.** A candidate
+gated three times against three incumbents keeps the third. Tags were chosen over params
+because a run is written before it is ever gated and a param refuses a rewrite, so the
+choice was between the latest verdict and none. Keeping the history means a child run per
+comparison or a second table, and `docs/adr-0007` says why neither was built yet.
+
+**`--no-report` has never met a store that refuses writes.** It is checked by parsing its
+flag and by the report write being outside the promote branch, not by being pointed at a
+read only backend, because there is no read only backend here.
+
+**Nothing checks that a published figure is portable.** A pass over every published
+figure found a byte count in this
+README that was the length of my checkout path plus 139, so it changed on every machine and
+reproduced on none. `docs/adr-0008` has the measurement. A figure that depends on a path, a
+hostname, a timing or a temporary directory would fail the same way and nothing here would
+catch it.
 
 **`settle` recovers a crash and does not authenticate a writer.** The witness rule works
 because `promote` and `retire` read the live alias into `from_version` immediately before

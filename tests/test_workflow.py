@@ -318,3 +318,51 @@ def check_the_reader_refuses_a_shape_it_does_not_understand():
         "echo hello",
         "python3 tests/run_all.py",
     ], _run_commands(sample)
+
+
+def check_every_adr_is_reachable_from_the_readme():
+    """An ADR nobody links is an ADR nobody reads.
+
+    `docs/adr-0006` sat unreferenced for a day while the README carried a whole section on
+    the finding it documents. Every other ADR was linked, so the gap was invisible by
+    inspection and only showed up when the two lists were diffed.
+
+    This is cheap and it only proves the link exists, not that it points at the right
+    paragraph.
+    """
+    import re
+
+    docs = os.path.join(ROOT, "docs")
+    adrs = sorted(f for f in os.listdir(docs) if f.startswith("adr-") and f.endswith(".md"))
+    assert len(adrs) >= 6, "found {} adrs, which cannot be right".format(len(adrs))
+
+    with open(os.path.join(ROOT, "README.md"), "r", encoding="utf-8") as fh:
+        readme = fh.read()
+
+    missing = []
+    for name in adrs:
+        stem = re.match(r"(adr-\d+)", name).group(1)
+        if stem not in readme:
+            missing.append(name)
+    assert not missing, "these adrs are not linked from the README: {}".format(missing)
+
+
+def check_every_adr_the_readme_names_actually_exists():
+    """The other direction. A link to an ADR that was renamed is worse than no link."""
+    import re
+
+    docs = os.path.join(ROOT, "docs")
+    present = {
+        re.match(r"(adr-\d+)", f).group(1)
+        for f in os.listdir(docs)
+        if f.startswith("adr-") and f.endswith(".md")
+    }
+
+    named = set()
+    for path in ("README.md",):
+        with open(os.path.join(ROOT, path), "r", encoding="utf-8") as fh:
+            named |= set(re.findall(r"adr-\d+", fh.read()))
+
+    assert named, "the README names no adr at all, so this check reads nothing"
+    dangling = sorted(named - present)
+    assert not dangling, "the README points at adrs that do not exist: {}".format(dangling)

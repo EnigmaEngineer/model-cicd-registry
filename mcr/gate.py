@@ -448,3 +448,92 @@ def report_lines(decision: Decision) -> List[str]:
     out.append("verdict      {}  ({})".format(decision.verdict, decision.reason))
     out.append("             {}".format(decision.detail))
     return out
+
+
+# The tag namespace the gate writes onto a candidate's run, and the one thing that reads it
+# back. Both halves live here because they are one vocabulary. They were split across two
+# scripts until 2026-09-17, which is how the reader came to check a different set of keys
+# from the ones the writer produced.
+TAG_PREFIX = "gate."
+TAG_VERDICT = TAG_PREFIX + "verdict"
+TAG_REASON = TAG_PREFIX + "reason"
+TAG_STAGE = TAG_PREFIX + "stage"
+TAG_INCUMBENT = TAG_PREFIX + "incumbent"
+
+NO_INCUMBENT = "none"
+
+
+def refusal_for(tags, stage: str, incumbent: Optional[int]) -> Optional[str]:
+    """Why a version must not be promoted to `stage`, or None if the gate cleared it.
+
+    Pure. It takes the run's tags, the stage being moved, and the version that holds that
+    stage right now. Every caller does its own IO and this decides. Written that way after
+    the first version needed a fake MLflow client to test at all, which meant the checks
+    graded a stand in rather than this.
+
+    Three refusals and the third is the one that matters.
+
+    No verdict at all. A version nothing has gated is the normal state of a freshly
+    registered model, and promoting it is the thing this exists to stop.
+
+    A verdict that is not a promotion. Refuse and reject both land here.
+
+    **A verdict earned against a different incumbent.** A comparison is against something.
+    Clearing version 2 while a weak model held production says nothing about whether it
+    beats the strong model that holds it now, and the tag is overwritten on the next gate
+    run so a stale verdict looks exactly like a fresh one. This is what "passed the latest
+    gate" has to mean, and the first version of this function missed it.
+    """
+    verdict = tags.get(TAG_VERDICT)
+    if verdict is None:
+        return "it has never been gated, so there is no verdict to honour"
+    if verdict != PROMOTE:
+        return "the gate's last verdict was {} ({})".format(
+            verdict, tags.get(TAG_REASON, "no reason recorded")
+        )
+
+    gated_stage = tags.get(TAG_STAGE)
+    if gated_stage != stage:
+        return "it was gated against {} and this moves {}".format(
+            gated_stage or "an unrecorded stage", stage
+        )
+
+    gated_against = tags.get(TAG_INCUMBENT)
+    if gated_against is None:
+        return (
+            "the verdict predates this check and does not record which incumbent it beat, "
+            "so it cannot be shown to be current"
+        )
+    now = NO_INCUMBENT if incumbent is None else str(incumbent)
+    if gated_against != now:
+        return "it was gated when {} held {} and {} holds it now".format(
+            _held(gated_against), stage, _held(now)
+        )
+    return None
+
+
+def _held(value: str) -> str:
+    """`none` is a sentinel and reads as a version number if it is formatted like one.
+
+    The first version printed "gated against version none", which a reader parses as a
+    version literally named none before they parse it as nothing.
+    """
+    return "nothing" if value == NO_INCUMBENT else "version " + value
+
+
+def refusal_for_version(cli, registry, model: str, ref: str, stage: str) -> Optional[str]:
+    """`refusal_for` with the IO around it. Returns a reason or None.
+
+    `registry` is passed in rather than imported, so this module still knows nothing about
+    the registry and cannot be the reason a promote starts depending on a gate. That is
+    the whole point of the split. The library can answer "did the gate clear this", and it
+    is the caller that decides whether to ask. `mcr.registry.promote` never asks.
+    """
+    version = registry.resolve(cli, model, ref)
+    run_id = cli.get_model_version(model, str(version)).run_id
+    if run_id is None:
+        return "version {} has no run behind it, so no verdict can be read".format(version)
+    reason = refusal_for(
+        cli.get_run(run_id).data.tags, stage, registry.current(cli, model, stage)
+    )
+    return None if reason is None else "version {}: {}".format(version, reason)

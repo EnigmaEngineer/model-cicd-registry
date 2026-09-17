@@ -134,7 +134,7 @@ def main(argv=None) -> int:
         # verdicts on record were the ones from a run that expected to win. A rejection
         # leaving no trace is the rejection you most want to read back six weeks later.
         run_id = cli.get_model_version(args.model, str(cand_version)).run_id
-        for key, value in report_tags(decision, args.stage).items():
+        for key, value in report_tags(decision, args.stage, held).items():
             cli.set_tag(run_id, key, value)
 
     if args.promote and decision.promoted:
@@ -152,19 +152,25 @@ def main(argv=None) -> int:
     return EXIT_REFUSE
 
 
-def report_tags(decision, stage: str) -> dict:
+def report_tags(decision, stage: str, incumbent=None) -> dict:
     """The comparison report, flattened onto the run that produced the candidate.
 
     Tags rather than params, because a run is written before it is ever gated and a param
     refuses a rewrite. A candidate can be gated more than once, against different
     incumbents, and the latest verdict is the one worth reading off the run.
+
+    `gate.incumbent` is what makes the verdict checkable later. Without it a reader can
+    see that the gate said promote and cannot see what it said promote *against*, so a
+    verdict earned against a weak incumbent still reads as a pass once a strong one holds
+    the stage. The key names live in `mcr.gate` next to the function that reads them.
     """
     from mcr import gate
 
     tags = {
-        "gate.stage": stage,
-        "gate.verdict": decision.verdict,
-        "gate.reason": decision.reason,
+        gate.TAG_STAGE: stage,
+        gate.TAG_VERDICT: decision.verdict,
+        gate.TAG_REASON: decision.reason,
+        gate.TAG_INCUMBENT: gate.NO_INCUMBENT if incumbent is None else str(incumbent),
         "gate.holdout": decision.holdout,
         "gate.metric": gate.METRIC,
     }

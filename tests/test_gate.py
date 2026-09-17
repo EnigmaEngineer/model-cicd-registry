@@ -880,3 +880,140 @@ def check_a_rejection_report_carries_the_reason_and_not_only_the_verdict():
     assert tags["gate.holdout"] == "fp123456"
     # Round trip, so a tag holding a truncated float is caught here and not by a reader.
     assert eval(tags["gate.mean_diff"]) == decision.mean_diff
+
+
+# --- the gate verdict as a promotion precondition ---------------------------------
+
+
+def _cleared(**over):
+    tags = {
+        gate.TAG_VERDICT: gate.PROMOTE,
+        gate.TAG_STAGE: "production",
+        gate.TAG_INCUMBENT: "7",
+        gate.TAG_REASON: "better",
+    }
+    tags.update(over)
+    return tags
+
+
+def check_a_version_the_gate_cleared_against_the_current_incumbent_is_allowed():
+    """The control. Every other case here refuses, so without this one the whole table is
+    satisfied by a function that refuses everything."""
+    assert gate.refusal_for(_cleared(), "production", 7) is None
+
+
+def check_every_reason_a_promotion_must_be_refused():
+    """Five refusals, each asserting on its own message rather than just on refusing.
+
+    Case four is the one the first version of this missed and it is the one the question
+    was actually about. A verdict is a comparison against something. Clearing a candidate
+    while a weak model held the stage says nothing about the strong model holding it now,
+    and the tag is overwritten each run so a stale verdict is indistinguishable from a
+    fresh one. Measured on a real store: a candidate that passed against the weak
+    incumbent comes back `reject (not_separated)` when re-gated against the current one.
+    """
+    cases = [
+        ("never gated", {}, 7, "never been gated"),
+        ("refused", _cleared(**{gate.TAG_VERDICT: "refuse",
+                                gate.TAG_REASON: "candidate_not_finite"}), 7, "was refuse"),
+        ("rejected", _cleared(**{gate.TAG_VERDICT: "reject",
+                                 gate.TAG_REASON: "worse"}), 7, "was reject"),
+        ("gated for another stage", _cleared(**{gate.TAG_STAGE: "staging"}), 7,
+         "gated against staging"),
+        ("stale, a different incumbent now", _cleared(), 9,
+         "version 7 held production and version 9 holds it now"),
+        ("stale, nothing holds the stage now", _cleared(), None,
+         "version 7 held production and nothing holds it now"),
+        ("gated when nothing held it, something does now",
+         _cleared(**{gate.TAG_INCUMBENT: gate.NO_INCUMBENT}), 3,
+         "gated when nothing held production and version 3 holds it now"),
+        ("verdict predates the incumbent record",
+         {gate.TAG_VERDICT: gate.PROMOTE, gate.TAG_STAGE: "production"}, 7,
+         "does not record which incumbent"),
+    ]
+    for label, tags, incumbent, expected in cases:
+        reason = gate.refusal_for(tags, "production", incumbent)
+        assert reason is not None, "{}: allowed through".format(label)
+        assert expected in reason, "{}: got {!r}".format(label, reason)
+
+
+def check_a_first_promotion_into_an_empty_stage_still_works():
+    """Nothing in production is a real state and the gate says `no_incumbent` for it.
+
+    Refusing it would make the guard unusable on a fresh store, which is every CI run.
+    """
+    tags = _cleared(**{gate.TAG_INCUMBENT: gate.NO_INCUMBENT, gate.TAG_REASON: "no_incumbent"})
+    assert gate.refusal_for(tags, "production", None) is None
+
+
+def check_the_writer_and_the_reader_agree_on_the_tag_names():
+    """The two halves lived in different files and drifted. Pinned by round trip.
+
+    `report_tags` is in `scripts/gate.py` and `refusal_for` is here. A rename on one side
+    used to leave the other reading keys nothing writes, which fails open, because a
+    missing verdict tag reads as never gated rather than as a broken check.
+    """
+    import importlib.util
+
+    path = os.path.join(ROOT, "scripts", "gate.py")
+    spec_ = importlib.util.spec_from_file_location("gate_cli_tags2", path)
+    mod = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(mod)
+
+    inc = _hand("inc", np.full(200, 0.60))
+    cand = _hand("cand", np.full(200, 0.40))
+    decision = gate.decide(cand, inc, "fp")
+    assert decision.verdict == gate.PROMOTE
+
+    written = mod.report_tags(decision, "production", 7)
+    for key in (gate.TAG_VERDICT, gate.TAG_STAGE, gate.TAG_INCUMBENT, gate.TAG_REASON):
+        assert key in written, "{} is read and never written".format(key)
+    assert gate.refusal_for(written, "production", 7) is None
+    assert gate.refusal_for(written, "production", 8) is not None
+
+
+def check_the_guard_is_asked_by_the_two_commands_that_reach_production():
+    """Which callers ask is policy, and policy that is not pinned quietly changes.
+
+    The first version of this guard covered `registry.py promote` only. `deploy.py land`
+    promotes whatever is on trial, so a refused version reached production through
+    `open` then `land` in two commands. Measured before the fix. `open` is where the
+    check belongs, because `land` acts on the canary's own evidence.
+    """
+    import ast
+
+    for script, subcommand in (("registry.py", "promote"), ("deploy.py", "open")):
+        path = os.path.join(ROOT, "scripts", script)
+        tree = ast.parse(open(path).read())
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "refusal_for_version"
+        ]
+        assert calls, "{} never asks the gate, so {} is unguarded".format(script, subcommand)
+
+
+def check_rollback_never_asks_the_gate():
+    """Pinned as an absence, because symmetry is the obvious wrong move here.
+
+    A version being rolled back to was cleared against an incumbent that is no longer
+    there, so under the staleness rule above every rollback would refuse. Recovery has to
+    work when the world has moved on.
+    """
+    import ast
+
+    path = os.path.join(ROOT, "scripts", "registry.py")
+    tree = ast.parse(open(path).read())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        src = ast.dump(node)
+        if "'rollback'" not in src and '"rollback"' not in src:
+            continue
+        parent = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.If) and n.test is node]
+        for p in parent:
+            body = ast.dump(ast.Module(body=p.body, type_ignores=[]))
+            assert "refusal_for_version" not in body, (
+                "the rollback branch asks the gate, which refuses every recovery"
+            )

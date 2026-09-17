@@ -65,9 +65,9 @@ python3 scripts/registry_probe.py
 ```
 
 `promote` moves an alias and asks nothing about how the version got there. `--require-gate`
-refuses unless the gate's last verdict on that version was a promotion **for that same
-stage**. It is opt in, and the section below says why it is not the default and what it
-cannot do.
+refuses unless the gate cleared that version, for that stage, **against whoever holds the
+stage right now**. `deploy.py open` takes the same flag, because the canary is the other way
+in. Both are opt in and the section below says what that does and does not buy.
 
 And the gate sits in front of it.
 
@@ -86,6 +86,7 @@ command, so the share survives the process that set it.
 
 ```
 python3 scripts/deploy.py open   --store sqlite:///mlflow.db --canary 4 --fraction 0.05
+python3 scripts/deploy.py open   --store sqlite:///mlflow.db --canary 4 --fraction 0.05 --require-gate
 python3 scripts/deploy.py status --store sqlite:///mlflow.db
 python3 scripts/canary.py --store sqlite:///mlflow.db --canary canary
 python3 scripts/deploy.py abort  --store sqlite:///mlflow.db
@@ -138,8 +139,8 @@ mcr/canary.py     routing a slice of traffic, and the two comparisons that gives
 mcr/deploy.py     what is deployed. production, the canary on trial, and the share it takes
 ```
 
-Eleven entry points in `scripts/`. Three runners in `tests/`, carrying 209 checks without
-MLflow and 317 with it. The third runner covers the registry and deployment modules only,
+Eleven entry points in `scripts/`. Three runners in `tests/`, carrying 215 checks without
+MLflow and 319 with it. The third runner covers the registry and deployment modules only,
 at 15.4 seconds against 28.6 for the full store suite, which is what a mutation pass over
 those two modules needs to fit inside one shell invocation.
 
@@ -527,7 +528,7 @@ ones are gone, which is in the limitations.
 ### Nothing stopped you promoting a model the gate had just refused
 
 A reader asked whether promoting straight past the gate was intentional. It was not
-prevented, it was not documented, and it is worth showing rather than describing.
+prevented and it was not documented. Worth showing rather than describing.
 
 ```
 $ python3 scripts/registry.py --store sqlite:///mlflow.db report 2
@@ -539,25 +540,46 @@ production: 1 -> 2
 ```
 
 A model scoring NaN, in production, in one command. The refusal was already written on that
-version's run and `promote` never looked at it. Worse, `history production` then shows an
-ordinary transition, so nothing downstream can tell the difference.
+version's run and `promote` never looked. `history production` then shows an ordinary
+transition, so nothing downstream can tell the difference.
 
-`--require-gate` closes it, and the shape of the fix is the interesting part.
+**The first fix was wrong in two ways and both are worth keeping.**
 
-**It is not in `mcr/registry.promote`,** where it looks like it belongs. `rollback` is
-implemented as a promote. A version being rolled back to was gated against whatever was
-incumbent at the time, which is not what is incumbent now, so enforcing this in the library
-makes the recovery path depend on a stale verdict. Recovery has to work when the world has
-moved on.
+*It guarded one door out of three.* `registry.promote` has three callers that reach
+production. Adding a flag to the registry command left `deploy.py open` followed by
+`deploy.py land` as a two command path onto the same NaN model, because `land` promotes
+whatever is on trial and nothing asked how the trial started. Measured, not reasoned about.
+The check now sits on `open` as well, which is where a trial should be refused. It is
+deliberately not on `land`, because by then the canary has its own evidence.
 
-**It checks the stage too.** A promotion verdict earned against `staging` does not license a
-move to `production`, which is the same hole one level down.
+*It checked that a verdict existed rather than that it still applied.* A comparison is
+against something. Clearing a candidate while a weak model held production says nothing
+about the strong model holding it now, and the tag is overwritten on every gate run so a
+stale verdict is indistinguishable from a fresh one. The gate now records `gate.incumbent`
+and the check refuses a verdict earned against anything else.
 
-**It is not a security control and the README should not imply otherwise.** The verdict
-lives in MLflow tags, and a tag overwrites silently. Anybody who can promote can also write
-`gate.verdict=promote`. This stops a pipeline promoting something the gate refused. It does
-not stop a writer who intends to. The transition log has the same property, which is why
-`settle` recovers a crash and does not authenticate a writer.
+That second one was not hypothetical. A candidate that passed against the weak incumbent
+came back `reject (not_separated)` when re-gated against the one actually in production.
+
+```
+$ registry.py promote 2 production --require-gate
+refused: version 2: it was gated when version 1 held production and version 3 holds it now
+```
+
+**Where the check lives.** `mcr.gate.refusal_for` is a pure function over a run's tags, the
+stage, and whoever holds that stage now. The library can answer whether the gate cleared a
+version. It never asks the question itself, and `mcr.registry.promote` still knows nothing
+about gates. Deciding to ask is policy and lives in the two commands that reach production.
+
+**`rollback` never asks,** and under the staleness rule it could not. The version you return
+to was cleared against an incumbent that is no longer there, so every recovery would refuse.
+Recovery has to work when the world has moved on. Pinned as an absence in the checks.
+
+**It is not a security control.** The verdict lives in an MLflow tag and a tag overwrites
+silently, so anybody who can promote can write `gate.verdict=promote` first. This stops a
+pipeline promoting something the gate refused. It does not stop a writer who means to, and
+the transition log has the same property, which is why `settle` recovers a crash and does
+not authenticate a writer.
 
 ## The comparison that is False in both directions
 
@@ -869,14 +891,18 @@ the other order by dropping an entry the store cannot confirm. This one leaves t
 that served absent from the log entirely, and the direction of the move with it, so
 `rollback_target` refuses. The refusal names what it found and there is no repair.
 
-**`--require-gate` is off by default, so the unguarded promotion is still one flag away.**
-Defaulting it on would put the check on the rollback path, because rollback is a promote.
-Making rollback exempt inside the library means the library knowing which caller it is
-serving, which is worse than the gap. So the default is a deliberate choice and it is still
-a gap, and an operator who never passes the flag has exactly the behaviour a reader flagged.
+**`--require-gate` is off by default on both commands, so the unguarded promotion is still
+one flag away.** An operator who never passes it has exactly the behaviour a reader
+flagged. Turning it on by default is a real option and the reason it has not been taken is
+that it changes the meaning of every existing call rather than that it would be wrong.
 
 **The gate requirement reads a mutable tag.** Anybody who can promote can write
 `gate.verdict=promote` first. It is a guard against automation, not against intent.
+
+**Only two of the three callers that reach production ask.** `scripts/canary.py` promotes on
+a canary verdict and does not consult the gate, on the argument that the canary is its own
+evidence. That argument is weaker than it sounds, because the canary can only have started
+if somebody opened it, and `open` is only guarded when asked.
 
 **The gate records its latest verdict on a run and not its earlier ones.** A candidate
 gated three times against three incumbents keeps the third. Tags were chosen over params

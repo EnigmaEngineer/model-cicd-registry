@@ -5,7 +5,7 @@ name: train, gate, canary
 # later step greps, because a grep over stdout passes on a run that printed nothing.
 #
 # This file ran for the first time on 2026-09-16 and the deploy job failed, after six days
-# of passing every static check written for it. tests/test_workflow.py reads the file and
+# of passing all ten static checks written for it. tests/test_workflow.py reads the file and
 # fails when it names a script the repo does not have, when a command does not parse against
 # that script's own parser, or when a step branches on an exit code the script cannot return.
 # All of those passed. None of them can see that the SEQUENCE of correct commands describes

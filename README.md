@@ -819,9 +819,9 @@ has ever deployed anything that outlived a build. A real pipeline's incumbent is
 last shipped, and this one's incumbent is a model trained ninety seconds earlier for the
 purpose.
 
-**Four checks read that workflow and a fifth thing broke it.** The four are worth having and
-none of them could see a sequence of correct commands that cannot happen in order. Assume
-the fifth kind exists again.
+**Ten checks read that workflow and an eleventh kind of thing broke it.** All ten are worth
+having and not one could see a sequence of correct commands that cannot happen in order.
+Assume the next kind exists too.
 
 **A crash between the alias move and the log write is not recoverable.** `settle` recovers
 the other order by dropping an entry the store cannot confirm. This one leaves the version

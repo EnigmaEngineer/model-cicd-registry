@@ -54,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--canary", required=True, help="a version number or an alias")
     p.add_argument("--fraction", type=float, required=True)
+    p.add_argument(
+        "--require-gate",
+        action="store_true",
+        help="refuse unless the gate cleared that version against what holds production",
+    )
 
     sub.add_parser(
         "abort",
@@ -72,7 +77,7 @@ def main(argv=None) -> int:
 
     import mlflow
 
-    from mcr import deploy, registry
+    from mcr import deploy, gate, registry
 
     try:
         cli = mlflow.MlflowClient(tracking_uri=args.store, registry_uri=args.store)
@@ -94,6 +99,21 @@ def main(argv=None) -> int:
 
     try:
         if args.command == "open":
+            # The canary is the other way into production. `land` promotes whatever is on
+            # trial, so a version the gate refused reaches production in two commands
+            # unless the trial itself is gated. Measured on 2026-09-17, before this
+            # existed: open on a NaN model, then land, and production moved.
+            #
+            # The check goes on `open` and not on `land` because `land` acts on the
+            # canary's own evidence. What has to be true is that the trial should have
+            # started at all.
+            if args.require_gate:
+                refusal = gate.refusal_for_version(
+                    cli, registry, args.model, args.canary, deploy.PRODUCTION
+                )
+                if refusal is not None:
+                    print("refused: {}".format(refusal), file=sys.stderr)
+                    return 2
             after = deploy.open_canary(cli, args.model, args.canary, args.fraction)
         elif args.command == "abort":
             after = deploy.abort_canary(cli, args.model)

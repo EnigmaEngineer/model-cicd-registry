@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("promote", help="point a stage at a version")
     p.add_argument("ref", help="a version number or the stage that currently holds it")
     p.add_argument("stage")
+    p.add_argument(
+        "--require-gate",
+        action="store_true",
+        help="refuse unless the gate's last verdict on that version was promote",
+    )
 
     p = sub.add_parser("history", help="every transition of one stage, oldest first")
     p.add_argument("stage")
@@ -48,6 +53,59 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("ref", help="a version number or the stage that currently holds it")
 
     return parser
+
+
+GATE_VERDICT = "gate.verdict"
+GATE_REASON = "gate.reason"
+GATE_STAGE = "gate.stage"
+
+
+def gate_refusal(cli, registry, model, ref, stage):
+    """Why this version must not be promoted, or None if the gate cleared it.
+
+    Asked for by `--require-gate` and off by default. Both halves of that need a reason.
+
+    Why it exists. `promote` moves an alias. It does not know what a holdout is and it has
+    never read a verdict, so until this flag a pipeline could promote a version the gate
+    had just refused, and the transition log would record an ordinary promotion. Raised by
+    a reader on 2026-09-17 and demonstrated on a clean store: a config that trains to a NaN
+    is refused by the gate and promoted by hand in the next command.
+
+    Why it is not the default, and why it is not in `mcr/registry.promote`. `rollback`
+    calls `promote`. A version being rolled back to was gated against whatever was
+    incumbent at the time, which is not what is incumbent now, so enforcing this in the
+    library makes the recovery path depend on a stale verdict. The stage is the wrong
+    place for a policy about how a stage is reached.
+
+    What this is not. The verdict lives in MLflow tags and a tag overwrites silently, so
+    anybody who can promote can also write `gate.verdict=promote`. This stops automation
+    promoting something the gate refused. It does not stop a writer who means to. The
+    transition log has the same property and `mcr/registry.settle` says so too.
+    """
+    version = registry.resolve(cli, model, ref)
+    run_id = cli.get_model_version(model, str(version)).run_id
+    tags = cli.get_run(run_id).data.tags
+
+    verdict = tags.get(GATE_VERDICT)
+    if verdict is None:
+        return "version {} has never been gated, so there is no verdict to honour".format(
+            version
+        )
+    if verdict != "promote":
+        return "the gate's last verdict on version {} was {} ({})".format(
+            version, verdict, tags.get(GATE_REASON, "no reason recorded")
+        )
+
+    # A verdict earned against one stage says nothing about another. Promoting to
+    # production on the strength of a staging comparison is the same hole one level down.
+    gated_stage = tags.get(GATE_STAGE)
+    if gated_stage != stage:
+        return (
+            "version {} was gated against {} and this promotes it to {}".format(
+                version, gated_stage or "an unrecorded stage", stage
+            )
+        )
+    return None
 
 
 def main(argv=None) -> int:
@@ -84,6 +142,11 @@ def main(argv=None) -> int:
 
     try:
         if args.command == "promote":
+            if args.require_gate:
+                refusal = gate_refusal(cli, registry, args.model, args.ref, args.stage)
+                if refusal is not None:
+                    print("refused: {}".format(refusal), file=sys.stderr)
+                    return 2
             entry = registry.promote(cli, args.model, args.ref, args.stage)
             if not entry.logged:
                 print("{} already points at version {}".format(args.stage, entry.to_version))

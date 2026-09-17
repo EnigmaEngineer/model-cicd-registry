@@ -59,9 +59,15 @@ The registry sits on the same store.
 python3 scripts/train.py configs/baseline.yml --track sqlite:///mlflow.db --register mcr-fraud
 python3 scripts/registry.py --store sqlite:///mlflow.db list
 python3 scripts/registry.py --store sqlite:///mlflow.db promote 1 production
+python3 scripts/registry.py --store sqlite:///mlflow.db promote 1 production --require-gate
 python3 scripts/registry.py --store sqlite:///mlflow.db rollback production
 python3 scripts/registry_probe.py
 ```
+
+`promote` moves an alias and asks nothing about how the version got there. `--require-gate`
+refuses unless the gate's last verdict on that version was a promotion **for that same
+stage**. It is opt in, and the section below says why it is not the default and what it
+cannot do.
 
 And the gate sits in front of it.
 
@@ -132,8 +138,8 @@ mcr/canary.py     routing a slice of traffic, and the two comparisons that gives
 mcr/deploy.py     what is deployed. production, the canary on trial, and the share it takes
 ```
 
-Eleven entry points in `scripts/`. Three runners in `tests/`, carrying 208 checks without
-MLflow and 312 with it. The third runner covers the registry and deployment modules only,
+Eleven entry points in `scripts/`. Three runners in `tests/`, carrying 209 checks without
+MLflow and 317 with it. The third runner covers the registry and deployment modules only,
 at 15.4 seconds against 28.6 for the full store suite, which is what a mutation pass over
 those two modules needs to fit inside one shell invocation.
 
@@ -518,6 +524,41 @@ refuses a rewrite. A candidate can be gated more than once against different inc
 and the latest verdict is the one worth reading off the run. The cost is that the earlier
 ones are gone, which is in the limitations.
 
+### Nothing stopped you promoting a model the gate had just refused
+
+A reader asked whether promoting straight past the gate was intentional. It was not
+prevented, it was not documented, and it is worth showing rather than describing.
+
+```
+$ python3 scripts/registry.py --store sqlite:///mlflow.db report 2
+gate.reason = candidate_not_finite
+gate.verdict = refuse
+
+$ python3 scripts/registry.py --store sqlite:///mlflow.db promote 2 production
+production: 1 -> 2
+```
+
+A model scoring NaN, in production, in one command. The refusal was already written on that
+version's run and `promote` never looked at it. Worse, `history production` then shows an
+ordinary transition, so nothing downstream can tell the difference.
+
+`--require-gate` closes it, and the shape of the fix is the interesting part.
+
+**It is not in `mcr/registry.promote`,** where it looks like it belongs. `rollback` is
+implemented as a promote. A version being rolled back to was gated against whatever was
+incumbent at the time, which is not what is incumbent now, so enforcing this in the library
+makes the recovery path depend on a stale verdict. Recovery has to work when the world has
+moved on.
+
+**It checks the stage too.** A promotion verdict earned against `staging` does not license a
+move to `production`, which is the same hole one level down.
+
+**It is not a security control and the README should not imply otherwise.** The verdict
+lives in MLflow tags, and a tag overwrites silently. Anybody who can promote can also write
+`gate.verdict=promote`. This stops a pipeline promoting something the gate refused. It does
+not stop a writer who intends to. The transition log has the same property, which is why
+`settle` recovers a crash and does not authenticate a writer.
+
 ## The comparison that is False in both directions
 
 `configs/candidate-diverged.yml` trains to a NaN. `l2: 100` overflows and training does not
@@ -827,6 +868,15 @@ Assume the next kind exists too.
 the other order by dropping an entry the store cannot confirm. This one leaves the version
 that served absent from the log entirely, and the direction of the move with it, so
 `rollback_target` refuses. The refusal names what it found and there is no repair.
+
+**`--require-gate` is off by default, so the unguarded promotion is still one flag away.**
+Defaulting it on would put the check on the rollback path, because rollback is a promote.
+Making rollback exempt inside the library means the library knowing which caller it is
+serving, which is worse than the gap. So the default is a deliberate choice and it is still
+a gap, and an operator who never passes the flag has exactly the behaviour a reader flagged.
+
+**The gate requirement reads a mutable tag.** Anybody who can promote can write
+`gate.verdict=promote` first. It is a guard against automation, not against intent.
 
 **The gate records its latest verdict on a run and not its earlier ones.** A candidate
 gated three times against three incumbents keeps the third. Tags were chosen over params

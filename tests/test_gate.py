@@ -24,7 +24,6 @@ from mcr.config import DataConfig, ModelConfig, TrainConfig, from_dict, load
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
 def _cfg(name="fixture", seed=11, epochs=80, l2=0.001, n_rows=2000, learning_rate=0.5):
     """Small and fast. The shipped configs are 20,000 rows and this file fits many runs."""
     return from_dict(
@@ -47,10 +46,8 @@ def _cfg(name="fixture", seed=11, epochs=80, l2=0.001, n_rows=2000, learning_rat
         }
     )
 
-
 def _spec(cfg=None):
     return gate.spec_from_config(cfg or _cfg())
-
 
 def _scored(cfg, spec=None, name=None):
     spec = spec or _spec()
@@ -62,7 +59,6 @@ def _scored(cfg, spec=None, name=None):
         spec,
         reported={"holdout_{}".format(gate.METRIC): r.metrics["holdout_log_loss"]},
     )
-
 
 def _hand(name, losses, auc=0.7, artifact_hash=None, reported=None):
     """A Scored built from numbers rather than from a model.
@@ -81,14 +77,9 @@ def _hand(name, losses, auc=0.7, artifact_hash=None, reported=None):
         reported=reported or {},
     )
 
-
-# --- the holdout -----------------------------------------------------------------
-
-
 def check_the_holdout_fingerprint_is_stable_across_calls():
     spec = _spec()
     assert spec.fingerprint() == spec.fingerprint()
-
 
 def check_the_holdout_fingerprint_is_twelve_characters():
     """A width, pinned for the same reason the transition log's is.
@@ -98,7 +89,6 @@ def check_the_holdout_fingerprint_is_twelve_characters():
     one passed.
     """
     assert len(_spec().fingerprint()) == 12
-
 
 def check_the_config_sections_are_frozen():
     """Every dataclass in this module holds something a decision was made from.
@@ -120,12 +110,10 @@ def check_the_config_sections_are_frozen():
             continue
         raise AssertionError("{}.{} was reassigned".format(type(obj).__name__, attr))
 
-
 def check_the_holdout_fingerprint_moves_with_the_seed():
     a = gate.HoldoutSpec(data=_cfg().data, seed=11)
     b = gate.HoldoutSpec(data=_cfg().data, seed=12)
     assert a.fingerprint() != b.fingerprint()
-
 
 def check_the_holdout_fingerprint_moves_with_the_data_config():
     base = _cfg().data
@@ -139,7 +127,6 @@ def check_the_holdout_fingerprint_moves_with_the_data_config():
     a = gate.HoldoutSpec(data=base, seed=11)
     b = gate.HoldoutSpec(data=other, seed=11)
     assert a.fingerprint() != b.fingerprint()
-
 
 def check_the_fingerprint_is_over_the_rows_and_not_over_the_spec():
     """Two specs that name the same rows fingerprint the same.
@@ -155,16 +142,13 @@ def check_the_fingerprint_is_over_the_rows_and_not_over_the_spec():
     assert len(y) == int(round(a.data.n_rows * a.data.holdout_frac))
     assert x.shape[1] == a.data.n_features
 
-
 def check_the_holdout_rows_are_not_the_training_rows():
     cfg = _cfg()
     spec = gate.spec_from_config(cfg)
     x, _ = spec.rows()
     assert len(x) + int(round(cfg.data.n_rows * (1 - cfg.data.holdout_frac))) == cfg.data.n_rows
 
-
-# --- scoring a model out of an artefact ------------------------------------------
-
+# scoring a model out of an artefact
 
 def check_a_model_rebuilt_from_an_artefact_scores_identically():
     cfg = _cfg()
@@ -173,7 +157,6 @@ def check_a_model_rebuilt_from_an_artefact_scores_identically():
     x, _ = _spec(cfg).rows()
     assert np.array_equal(rebuilt.predict_proba(x), r.model.predict_proba(x))
 
-
 def check_an_artefact_with_no_model_section_is_refused():
     try:
         gate.model_from_artifact({"metrics": {}})
@@ -181,7 +164,6 @@ def check_an_artefact_with_no_model_section_is_refused():
         assert "no model" in str(exc)
         return
     raise AssertionError("a payload with no model was accepted")
-
 
 def check_the_row_losses_average_to_the_reported_log_loss():
     """Exact equality rather than a tolerance.
@@ -192,7 +174,6 @@ def check_the_row_losses_average_to_the_reported_log_loss():
     cfg = _cfg()
     s = _scored(cfg)
     assert s.log_loss == float(np.mean(s.row_losses))
-
 
 def check_a_probability_of_one_gives_a_finite_loss():
     """The clip is the only thing standing between a confident model and an infinite loss.
@@ -207,7 +188,6 @@ def check_a_probability_of_one_gives_a_finite_loss():
     assert np.isfinite(losses).all()
     assert (losses > 30.0).all()
 
-
 def check_the_score_matches_the_projects_own_log_loss_function():
     cfg = _cfg()
     spec = _spec(cfg)
@@ -215,7 +195,6 @@ def check_the_score_matches_the_projects_own_log_loss_function():
     x, y = spec.rows()
     direct = model_mod.log_loss(y.astype(float), r.model.predict_proba(x))
     assert abs(_scored(cfg, spec).log_loss - direct) < 1e-12
-
 
 def check_a_holdout_with_one_class_gives_a_non_finite_auc_rather_than_raising():
     """`roc_auc` raises when a class is absent and a gate that dies cannot refuse.
@@ -236,10 +215,6 @@ def check_a_holdout_with_one_class_gives_a_non_finite_auc_rather_than_raising():
     except ValueError as exc:
         assert "both classes" in str(exc)
 
-
-# --- the interval ----------------------------------------------------------------
-
-
 def check_the_interval_refuses_a_sample_it_cannot_measure_spread_on():
     for n in (0, 1):
         try:
@@ -250,7 +225,6 @@ def check_the_interval_refuses_a_sample_it_cannot_measure_spread_on():
         raise AssertionError("an interval was built on {} rows".format(n))
     gate.paired_interval(np.asarray([0.1, 0.2]))
 
-
 def check_the_bootstrap_refuses_zero_rows():
     try:
         gate.bootstrap_interval(np.asarray([], dtype=np.float64))
@@ -258,7 +232,6 @@ def check_the_bootstrap_refuses_zero_rows():
         assert "zero rows" in str(exc)
         return
     raise AssertionError("an interval was built on nothing")
-
 
 def check_a_clearly_negative_difference_gives_an_interval_that_excludes_zero():
     rng = np.random.default_rng(1)
@@ -268,24 +241,20 @@ def check_a_clearly_negative_difference_gives_an_interval_that_excludes_zero():
     assert hi < 0.0
     assert lo <= float(np.mean(d)) <= hi
 
-
 def check_a_symmetric_difference_gives_an_interval_that_covers_zero():
     d = np.concatenate([np.full(500, -1.0), np.full(500, 1.0)])
     lo, hi = gate.paired_interval(d)
     assert lo < 0.0 < hi
 
-
 def check_the_interval_is_the_same_on_two_calls():
     d = np.linspace(-1.0, 0.5, 400)
     assert gate.paired_interval(d) == gate.paired_interval(d)
-
 
 def check_a_wider_confidence_gives_a_wider_interval():
     d = np.linspace(-1.0, 0.5, 400)
     lo95, hi95 = gate.paired_interval(d, confidence=0.95)
     lo80, hi80 = gate.paired_interval(d, confidence=0.80)
     assert (hi95 - lo95) > (hi80 - lo80)
-
 
 def check_the_interval_half_width_is_the_textbook_one():
     """The ordering check above survives any monotone mangling of the tail arithmetic.
@@ -300,12 +269,10 @@ def check_the_interval_half_width_is_the_textbook_one():
     se = float(np.std(d, ddof=1)) / math.sqrt(len(d))
     assert abs((hi - lo) / 2.0 - 1.959963984540054 * se) < 1e-12
 
-
 def check_the_normal_quantile_matches_known_values():
     for confidence, want in ((0.95, 1.959963984540054), (0.99, 2.5758293035489004),
                              (0.90, 1.6448536269514722), (0.6826894921370859, 1.0)):
         assert abs(gate._z_for(confidence) - want) < 1e-9, confidence
-
 
 def check_the_normal_quantile_refuses_a_confidence_outside_the_unit_interval():
     for bad in (0.0, 1.0, -0.5, 2.0):
@@ -316,10 +283,8 @@ def check_the_normal_quantile_refuses_a_confidence_outside_the_unit_interval():
             continue
         raise AssertionError("a confidence of {} was accepted".format(bad))
 
-
 def _verdict_from(lo, hi):
     return "promote" if hi < 0.0 else ("worse" if lo > 0.0 else "flat")
-
 
 def check_the_two_intervals_agree_at_the_size_the_gate_runs_at():
     """One statistic computed two ways, graded against each other rather than separately.
@@ -337,7 +302,6 @@ def check_the_two_intervals_agree_at_the_size_the_gate_runs_at():
         assert a == b, (shift, a, b)
         seen.add(a)
     assert seen == {"promote", "worse", "flat"}, seen
-
 
 def check_the_two_intervals_can_disagree_on_a_small_sample():
     """And the agreement above is a fact about 5,000 rows, not about the two methods.
@@ -357,7 +321,6 @@ def check_the_two_intervals_can_disagree_on_a_small_sample():
             disagreed += 1
     assert disagreed >= 1
 
-
 def check_the_bootstrap_resamples_every_row():
     """A mutant moving the low end of the resample index off zero never draws row zero.
 
@@ -369,15 +332,10 @@ def check_the_bootstrap_resamples_every_row():
     lo, hi = gate.bootstrap_interval(d)
     assert lo < -1.0
 
-
-# --- the verdicts ----------------------------------------------------------------
-
-
 def check_nothing_in_the_stage_promotes():
     d = gate.decide(_hand("c", np.full(100, 0.4)), None, "fp")
     assert d.verdict == gate.PROMOTE
     assert d.reason == "no_incumbent"
-
 
 def check_a_clearly_better_candidate_is_promoted():
     inc = _hand("inc", np.full(200, 0.60))
@@ -386,14 +344,12 @@ def check_a_clearly_better_candidate_is_promoted():
     assert d.verdict == gate.PROMOTE
     assert d.reason == "better"
 
-
 def check_a_clearly_worse_candidate_is_rejected():
     inc = _hand("inc", np.full(200, 0.40))
     cand = _hand("cand", np.full(200, 0.60))
     d = gate.decide(cand, inc, "fp")
     assert d.verdict == gate.REJECT
     assert d.reason == "worse"
-
 
 def check_a_difference_the_rows_cannot_resolve_is_not_a_promotion():
     rng = np.random.default_rng(3)
@@ -403,7 +359,6 @@ def check_a_difference_the_rows_cannot_resolve_is_not_a_promotion():
     assert d.verdict == gate.REJECT
     assert d.reason == "not_separated"
     assert d.interval[0] < 0.0 < d.interval[1]
-
 
 def check_a_majority_of_rows_is_not_a_decision():
     """Most rows better, mean unchanged. The gate holds the incumbent.
@@ -419,7 +374,6 @@ def check_a_majority_of_rows_is_not_a_decision():
     assert better == 70
     assert abs(cand.log_loss - inc.log_loss) < 1e-15
     assert gate.decide(cand, inc, "fp").verdict == gate.REJECT
-
 
 def check_an_interval_sitting_exactly_on_zero_does_not_promote():
     """Both boundaries, from the side that decides them.
@@ -441,7 +395,6 @@ def check_an_interval_sitting_exactly_on_zero_does_not_promote():
     assert d.verdict == gate.REJECT
     assert d.reason == "not_separated"
 
-
 def check_the_same_bytes_on_both_sides_is_refused_and_not_rejected():
     losses = np.full(200, 0.4)
     full = "9f2c1a" * 12
@@ -451,7 +404,6 @@ def check_the_same_bytes_on_both_sides_is_refused_and_not_rejected():
     assert d.verdict == gate.REFUSE
     assert d.reason == "same_artifact"
     assert full[:12] in d.detail and full[:13] not in d.detail
-
 
 def check_a_long_model_name_does_not_break_the_report_columns():
     """The label column truncates and nothing was checking the width it truncates to."""
@@ -463,14 +415,12 @@ def check_a_long_model_name_does_not_break_the_report_columns():
     for row in rows:
         assert len(row.split()[0]) + 1 + len(row.split()[1]) == 32
 
-
 def check_a_non_finite_candidate_is_refused():
     inc = _hand("inc", np.full(200, 0.4))
     cand = _hand("cand", np.full(200, float("nan")))
     d = gate.decide(cand, inc, "fp")
     assert d.verdict == gate.REFUSE
     assert d.reason == "candidate_not_finite"
-
 
 def check_a_non_finite_incumbent_is_refused_and_names_the_incumbent():
     """The dangerous half, and the reason there are two reasons rather than one.
@@ -487,7 +437,6 @@ def check_a_non_finite_incumbent_is_refused_and_names_the_incumbent():
     assert "broken-incumbent" in d.detail
     assert "cand" not in d.detail.split("incumbent")[0]
 
-
 def check_the_two_non_finite_cases_do_not_share_a_reason():
     nan = np.full(200, float("nan"))
     good = np.full(200, 0.4)
@@ -496,19 +445,16 @@ def check_the_two_non_finite_cases_do_not_share_a_reason():
     assert a.reason != b.reason
     assert a.verdict == b.verdict == gate.REFUSE
 
-
 def check_an_infinite_score_is_refused_as_well_as_a_nan():
     inc = _hand("inc", np.full(200, 0.4))
     cand = _hand("cand", np.concatenate([np.full(199, 0.4), [float("inf")]]))
     assert gate.decide(cand, inc, "fp").reason == "candidate_not_finite"
-
 
 def check_the_candidate_is_checked_before_the_incumbent():
     """Both broken. The candidate is the thing being judged, so it is named first."""
     nan = np.full(200, float("nan"))
     d = gate.decide(_hand("c", nan), _hand("i", nan), "fp")
     assert d.reason == "candidate_not_finite"
-
 
 def check_the_verdict_does_not_read_the_ranking():
     """Worse on the metric, better on AUC. The gate rejects it.
@@ -522,7 +468,6 @@ def check_the_verdict_does_not_read_the_ranking():
     d = gate.decide(cand, inc, "fp")
     assert d.verdict == gate.REJECT
     assert cand.roc_auc > inc.roc_auc
-
 
 def check_an_overconfident_model_with_identical_ranking_is_rejected():
     """The calibration case, on a real model rather than on hand written numbers.
@@ -558,7 +503,6 @@ def check_an_overconfident_model_with_identical_ranking_is_rejected():
     assert cand.log_loss > inc.log_loss
     assert gate.decide(cand, inc, "fp").verdict == gate.REJECT
 
-
 def check_the_decision_is_the_same_on_two_calls():
     inc = _hand("inc", np.linspace(0.3, 0.9, 300))
     cand = _hand("cand", np.linspace(0.29, 0.89, 300))
@@ -566,11 +510,9 @@ def check_the_decision_is_the_same_on_two_calls():
     b = gate.decide(cand, inc, "fp")
     assert (a.verdict, a.reason, a.interval) == (b.verdict, b.reason, b.interval)
 
-
 def check_the_holdout_fingerprint_travels_onto_the_decision():
     d = gate.decide(_hand("c", np.full(50, 0.4)), None, "56ab7ecf5a6b")
     assert d.holdout == "56ab7ecf5a6b"
-
 
 def check_promoted_is_true_only_for_a_promotion():
     inc = _hand("inc", np.full(200, 0.40))
@@ -578,16 +520,13 @@ def check_promoted_is_true_only_for_a_promotion():
     assert not gate.decide(_hand("c", np.full(200, 0.60)), inc, "fp").promoted
     assert not gate.decide(_hand("c", np.full(200, float("nan"))), inc, "fp").promoted
 
-
-# --- the rebuild, and the check that makes it sound -------------------------------
-
+# the rebuild, and the check that makes it sound
 
 def check_a_rebuild_whose_hash_agrees_returns_the_payload():
     cfg = _cfg()
     r = train_mod.run(cfg)
     payload = gate.rebuild(cfg, r.content_hash, "candidate")
     assert payload["config_fingerprint"] == cfg.fingerprint()
-
 
 def check_a_rebuild_whose_hash_disagrees_is_refused():
     """The message has to name both hashes, at a width somebody can compare by eye.
@@ -608,10 +547,6 @@ def check_a_rebuild_whose_hash_disagrees_is_refused():
         return
     raise AssertionError("the gate scored a model the registry does not point at")
 
-
-# --- the report -------------------------------------------------------------------
-
-
 def _reports_better_and_is_worse(spec, inc, seeds):
     """Models from other corpora that record a better number and lose on shared rows."""
     found = []
@@ -623,7 +558,6 @@ def _reports_better_and_is_worse(spec, inc, seeds):
         if better_on_paper and other.log_loss > inc.log_loss:
             found.append((seed, other))
     return found
-
 
 def check_a_run_that_records_a_better_number_can_be_worse_on_shared_rows():
     """The measurement the whole design rests on, as a rate rather than as one example.
@@ -637,7 +571,6 @@ def check_a_run_that_records_a_better_number_can_be_worse_on_shared_rows():
     inc = _scored(_cfg(name="incumbent"), spec)
     found = _reports_better_and_is_worse(spec, inc, range(12, 30))
     assert len(found) >= 5, "only {} of 18 seeds showed the disagreement".format(len(found))
-
 
 def check_the_report_carries_both_numbers_when_the_runs_used_different_corpora():
     """The disagreement is the whole reason the gate scores the models itself.
@@ -657,18 +590,15 @@ def check_the_report_carries_both_numbers_when_the_runs_used_different_corpora()
     assert "{:.6f}".format(other.reported["holdout_log_loss"]) in text
     assert spec.fingerprint() in text
 
-
 def check_the_report_says_which_way_the_metric_runs():
     text = "\n".join(gate.report_lines(gate.decide(_hand("c", np.full(50, 0.4)), None, "fp")))
     assert "lower is better" in text
     assert gate.METRIC in text
 
-
 def check_the_report_names_an_absent_incumbent_rather_than_omitting_the_row():
     text = "\n".join(gate.report_lines(gate.decide(_hand("c", np.full(50, 0.4)), None, "fp")))
     assert "incumbent" in text
     assert "none" in text
-
 
 def check_the_report_prints_a_non_finite_score_rather_than_crashing():
     inc = _hand("inc", np.full(50, 0.4))
@@ -676,7 +606,6 @@ def check_the_report_prints_a_non_finite_score_rather_than_crashing():
     text = "\n".join(gate.report_lines(gate.decide(cand, inc, "fp")))
     assert "nan" in text
     assert "refuse" in text
-
 
 def check_a_recorded_nan_and_a_missing_number_are_different_cells():
     """The dash means the run never recorded it. It must not also mean NaN.
@@ -697,10 +626,6 @@ def check_a_recorded_nan_and_a_missing_number_are_different_cells():
     b = "\n".join(gate.report_lines(gate.decide(never_recorded, inc, "fp")))
     assert a != b
 
-
-# --- the shipped configs ----------------------------------------------------------
-
-
 def check_the_shipped_candidates_are_judged_on_one_holdout():
     """The three converging configs really do share a corpus, and the broken ones do too.
 
@@ -714,7 +639,6 @@ def check_the_shipped_candidates_are_judged_on_one_holdout():
         cfg = load(os.path.join(ROOT, "configs", "{}.yml".format(name)))
         seen.add(gate.spec_from_config(cfg).fingerprint())
     assert len(seen) == 1, "shipped configs span {} holdouts".format(len(seen))
-
 
 def _train_quietly(cfg):
     """Train a config that overflows, and hand back what it warned about.
@@ -730,7 +654,6 @@ def _train_quietly(cfg):
         result = train_mod.run(cfg)
     return result, sorted({str(w.message) for w in caught})
 
-
 def check_the_diverged_config_really_does_produce_a_non_finite_metric():
     """The fixture has to carry the defect or the refusal is untested.
 
@@ -741,7 +664,6 @@ def check_the_diverged_config_really_does_produce_a_non_finite_metric():
     result, warned = _train_quietly(cfg)
     assert not math.isfinite(result.metrics["holdout_log_loss"])
     assert any("invalid value" in w for w in warned), warned
-
 
 def check_the_inverted_config_is_finite_and_worse_than_a_coin():
     """The harder of the two broken cases. Nothing in its metrics looks wrong.
@@ -756,7 +678,6 @@ def check_the_inverted_config_is_finite_and_worse_than_a_coin():
     assert result.metrics["holdout_roc_auc"] < 0.5
     assert warned == ["overflow encountered in matmul"], warned
 
-
 def _gate_cli():
     """Load scripts/gate.py as a module. It imports mlflow inside main, so this is cheap."""
     import importlib.util
@@ -766,7 +687,6 @@ def _gate_cli():
     mod = importlib.util.module_from_spec(spec_)
     spec_.loader.exec_module(mod)
     return mod, path
-
 
 def _enclosing_if_tests(tree, target):
     """Every `if` test that the target node sits underneath, innermost last."""
@@ -786,7 +706,6 @@ def _enclosing_if_tests(tree, target):
 
     walk(tree, [])
     return found[0] if found else None
-
 
 def check_the_gate_writes_its_verdict_without_being_asked_to_promote():
     """The rejection you want to read back later is the one nobody asked to promote.
@@ -819,7 +738,6 @@ def check_the_gate_writes_its_verdict_without_being_asked_to_promote():
         "the report write is still gated on --promote at line {}".format(calls[0].lineno)
     )
 
-
 def check_promote_still_guards_the_stage_move():
     """The other half. Loosening the report must not loosen the thing that moves production.
 
@@ -844,7 +762,6 @@ def check_promote_still_guards_the_stage_move():
         "the stage move at line {} is no longer behind --promote".format(calls[0].lineno)
     )
 
-
 def check_there_is_a_way_to_compare_without_touching_the_store():
     """Writing by default is only defensible if reading without writing stays possible."""
     mod, _path = _gate_cli()
@@ -856,7 +773,6 @@ def check_there_is_a_way_to_compare_without_touching_the_store():
     assert args.no_report is True
     assert args.promote is False
 
-
 def check_the_promote_flag_no_longer_advertises_writing_the_report():
     """The help text said --promote wrote the report. It was true and it is not now."""
     mod, _path = _gate_cli()
@@ -864,7 +780,6 @@ def check_the_promote_flag_no_longer_advertises_writing_the_report():
     promote_line = [line for line in help_text.splitlines() if "move the stage" in line]
     assert promote_line, help_text
     assert "report" not in promote_line[0], promote_line[0]
-
 
 def check_a_rejection_report_carries_the_reason_and_not_only_the_verdict():
     """A tag saying `reject` with no reason is a verdict nobody can act on."""
@@ -881,9 +796,7 @@ def check_a_rejection_report_carries_the_reason_and_not_only_the_verdict():
     # Round trip, so a tag holding a truncated float is caught here and not by a reader.
     assert eval(tags["gate.mean_diff"]) == decision.mean_diff
 
-
-# --- the gate verdict as a promotion precondition ---------------------------------
-
+# the gate verdict as a promotion precondition
 
 def _cleared(**over):
     tags = {
@@ -895,12 +808,10 @@ def _cleared(**over):
     tags.update(over)
     return tags
 
-
 def check_a_version_the_gate_cleared_against_the_current_incumbent_is_allowed():
     """The control. Every other case here refuses, so without this one the whole table is
     satisfied by a function that refuses everything."""
     assert gate.refusal_for(_cleared(), "production", 7) is None
-
 
 def check_every_reason_a_promotion_must_be_refused():
     """Five refusals, each asserting on its own message rather than just on refusing.
@@ -936,7 +847,6 @@ def check_every_reason_a_promotion_must_be_refused():
         assert reason is not None, "{}: allowed through".format(label)
         assert expected in reason, "{}: got {!r}".format(label, reason)
 
-
 def check_a_first_promotion_into_an_empty_stage_still_works():
     """Nothing in production is a real state and the gate says `no_incumbent` for it.
 
@@ -944,7 +854,6 @@ def check_a_first_promotion_into_an_empty_stage_still_works():
     """
     tags = _cleared(**{gate.TAG_INCUMBENT: gate.NO_INCUMBENT, gate.TAG_REASON: "no_incumbent"})
     assert gate.refusal_for(tags, "production", None) is None
-
 
 def check_the_writer_and_the_reader_agree_on_the_tag_names():
     """The two halves lived in different files and drifted. Pinned by round trip.
@@ -971,7 +880,6 @@ def check_the_writer_and_the_reader_agree_on_the_tag_names():
     assert gate.refusal_for(written, "production", 7) is None
     assert gate.refusal_for(written, "production", 8) is not None
 
-
 def check_the_guard_is_asked_by_the_two_commands_that_reach_production():
     """Which callers ask is policy, and policy that is not pinned quietly changes.
 
@@ -991,7 +899,6 @@ def check_the_guard_is_asked_by_the_two_commands_that_reach_production():
             and n.func.attr == "refusal_for_version"
         ]
         assert calls, "{} never asks the gate, so {} is unguarded".format(script, subcommand)
-
 
 def check_rollback_never_asks_the_gate():
     """Pinned as an absence, because symmetry is the obvious wrong move here.

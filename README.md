@@ -331,7 +331,7 @@ both, without moving production in either case.
 
 ## CI, and what three static checks could not see
 
-`.github/workflows/ci.yml` takes a merge through the suite and the drills and the probes.
+`.github/workflows/ci.yml` takes a merge through the suite, the drills and the probes.
 What survives that reaches the gate and then the canary.
 
 There was no GitHub runner in the environment this was built in, so for six days the file

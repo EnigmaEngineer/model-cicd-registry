@@ -29,7 +29,6 @@ from mcr.config import from_dict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
 def _cfg(name="fixture", seed=11, epochs=80, n_rows=2000):
     return from_dict(
         {
@@ -50,7 +49,6 @@ def _cfg(name="fixture", seed=11, epochs=80, n_rows=2000):
             },
         }
     )
-
 
 def _two_models(cand_epochs=1):
     """An incumbent and a worse candidate, scored on one holdout.
@@ -83,10 +81,6 @@ def _two_models(cand_epochs=1):
         rw,
     )
 
-
-# --- the router -------------------------------------------------------------------
-
-
 def check_router_refuses_a_fraction_at_or_outside_the_open_unit_interval():
     for bad in (0.0, 1.0, -0.1, 1.5):
         try:
@@ -95,7 +89,6 @@ def check_router_refuses_a_fraction_at_or_outside_the_open_unit_interval():
             continue
         raise AssertionError("Router accepted fraction {}".format(bad))
 
-
 def check_router_refuses_an_empty_salt():
     try:
         canary.Router(fraction=0.1, salt="")
@@ -103,13 +96,11 @@ def check_router_refuses_an_empty_salt():
         return
     raise AssertionError("Router accepted an empty salt")
 
-
 def check_router_is_sticky_across_objects():
     keys = canary.replay_keys(300)
     a = [canary.Router(fraction=0.2).arm(k) for k in keys]
     b = [canary.Router(fraction=0.2).arm(k) for k in keys]
     assert a == b, "a fresh Router moved keys between arms"
-
 
 def check_the_salt_changes_the_assignment():
     keys = canary.replay_keys(300)
@@ -117,14 +108,12 @@ def check_the_salt_changes_the_assignment():
     b = [canary.Router(fraction=0.2, salt="two").arm(k) for k in keys]
     assert a != b, "two salts produced the same slice, so two canaries cannot be separated"
 
-
 def check_the_router_hits_its_target_within_three_standard_errors():
     keys = canary.replay_keys(20000)
     for f in (0.05, 0.25, 0.5):
         got = float(canary.Router(fraction=f).assign(keys).mean())
         se = math.sqrt(f * (1.0 - f) / len(keys))
         assert abs(got - f) <= 3.0 * se, "target {} achieved {}".format(f, got)
-
 
 def check_raising_the_fraction_only_ever_adds_keys_to_the_slice():
     """A threshold on a fixed position is monotone, and the point is what that buys.
@@ -142,7 +131,6 @@ def check_raising_the_fraction_only_ever_adds_keys_to_the_slice():
         len(small - large)
     )
 
-
 def check_the_position_does_not_depend_on_python_hash_randomisation():
     """Pinned literal, so a switch to `hash()` is caught rather than merely suspected.
 
@@ -155,10 +143,6 @@ def check_the_position_does_not_depend_on_python_hash_randomisation():
     """
     got = canary.Router(fraction=0.5)._position("req-000000")
     assert abs(got - 0.2041058573655147) < 1e-12, "position moved to {!r}".format(got)
-
-
-# --- the two intervals ------------------------------------------------------------
-
 
 def check_split_interval_is_wider_than_the_paired_one_on_the_same_rows():
     """The day's finding, as a check.
@@ -174,7 +158,6 @@ def check_split_interval_is_wider_than_the_paired_one_on_the_same_rows():
     assert (shi - slo) > 5.0 * (phi - plo), (
         "split width {:.4e} against paired {:.4e}".format(shi - slo, phi - plo)
     )
-
 
 def check_split_interval_uses_both_arms_variances():
     """Lopsided arms on purpose.
@@ -198,7 +181,6 @@ def check_split_interval_uses_both_arms_variances():
     only_large = z * math.sqrt(2.0 * float(np.var(large_tight, ddof=1)) / 3000)
     assert half > 20.0 * only_large, "the small arm is not dominating, so the fixture is weak"
 
-
 def check_split_interval_refuses_an_arm_of_fewer_than_two_rows():
     a = np.array([1.0])
     b = np.arange(50, dtype=float)
@@ -208,7 +190,6 @@ def check_split_interval_refuses_an_arm_of_fewer_than_two_rows():
         except canary.CanaryError:
             continue
         raise AssertionError("split_interval accepted a one row arm")
-
 
 def check_split_interval_accepts_an_arm_of_exactly_two_rows():
     """The other side of the same limit, which is the side a mutant walks through.
@@ -226,14 +207,12 @@ def check_split_interval_accepts_an_arm_of_exactly_two_rows():
     mean2, _, _ = canary.split_interval(other, two)
     assert abs(mean2 + 1.5) < 1e-12, mean2
 
-
 def check_shadow_interval_refuses_mismatched_lengths():
     try:
         canary.shadow_interval(np.zeros(10), np.zeros(11))
     except canary.CanaryError:
         return
     raise AssertionError("shadow_interval accepted arms of different lengths")
-
 
 def check_shadow_interval_is_the_gates_interval():
     """One definition of the paired comparison in this repo, not two."""
@@ -244,7 +223,6 @@ def check_shadow_interval_is_the_gates_interval():
     glo, ghi = gate.paired_interval(a - b)
     assert (lo, hi) == (glo, ghi), "the canary's paired interval is not the gate's"
     assert abs(mean - float(np.mean(a - b))) < 1e-15
-
 
 def check_the_sign_convention_matches_the_gate():
     """Positive means the canary is worse, on a metric where lower is better.
@@ -257,15 +235,10 @@ def check_the_sign_convention_matches_the_gate():
     mean, _, _ = canary.split_interval(worse, better + np.linspace(-0.01, 0.01, 500))
     assert mean > 0.0, "a worse canary produced a negative difference"
 
-
-# --- sizing -----------------------------------------------------------------------
-
-
 def check_required_rows_falls_as_the_square_of_the_half_width():
     a = canary.required_rows(sd=0.5, half_width=1e-3, fraction=0.5)
     b = canary.required_rows(sd=0.5, half_width=2e-3, fraction=0.5)
     assert abs(a / b - 4.0) < 1e-9, "ratio {!r}".format(a / b)
-
 
 def check_required_rows_is_symmetric_in_the_fraction_and_worst_at_a_half():
     """The 1/(f*(1-f)) term, checked on both of its properties.
@@ -280,7 +253,6 @@ def check_required_rows_is_symmetric_in_the_fraction_and_worst_at_a_half():
             canary.required_rows(sd=0.5, half_width=1e-3, fraction=f)
             - canary.required_rows(sd=0.5, half_width=1e-3, fraction=1.0 - f)
         ) < 1e-6, "not symmetric at {}".format(f)
-
 
 def check_required_rows_agrees_with_a_measured_interval():
     """Sized against a real interval rather than only against itself.
@@ -300,7 +272,6 @@ def check_required_rows_agrees_with_a_measured_interval():
     got = canary.required_rows(sd, half, f)
     assert 0.8 * n < got < 1.25 * n, "asked for {!r} rows against {} used".format(got, n)
 
-
 def check_required_rows_refuses_degenerate_inputs():
     for kwargs in (
         {"sd": 0.0, "half_width": 1e-3, "fraction": 0.5},
@@ -315,10 +286,6 @@ def check_required_rows_refuses_degenerate_inputs():
             continue
         raise AssertionError("required_rows accepted {}".format(kwargs))
 
-
-# --- verdicts ---------------------------------------------------------------------
-
-
 def check_verdict_reads_the_interval_and_not_the_mean():
     assert canary._verdict_from(-1.0, -2.0, -0.5)[0] == canary.PROMOTE
     assert canary._verdict_from(1.0, 0.5, 2.0)[0] == canary.ROLLBACK
@@ -326,12 +293,10 @@ def check_verdict_reads_the_interval_and_not_the_mean():
     assert canary._verdict_from(-5.0, -11.0, 1.0)[0] == canary.HOLD
     assert canary._verdict_from(5.0, -1.0, 11.0)[0] == canary.HOLD
 
-
 def check_an_interval_touching_zero_is_a_hold():
     """The boundary, on both sides. A `<=` in either comparison flips these."""
     assert canary._verdict_from(-1.0, -2.0, 0.0)[0] == canary.HOLD
     assert canary._verdict_from(1.0, 0.0, 2.0)[0] == canary.HOLD
-
 
 def check_an_empty_arm_is_not_finite():
     """`finite()` guards on `n > 0` and every fixture had rows, so the limit was untested.
@@ -349,7 +314,6 @@ def check_an_empty_arm_is_not_finite():
         canary.CANARY, "one", "aaa", np.array([0.5]), np.array([1])
     )
     assert one.finite(), "an arm with a single finite row should be finite"
-
 
 def check_the_arm_dataclasses_are_frozen():
     """Three frozen dataclasses here and nothing asserted any of them.
@@ -370,7 +334,6 @@ def check_the_arm_dataclasses_are_frozen():
         return
     raise AssertionError("an ArmObservations accepted a write to name")
 
-
 def check_a_position_exactly_on_the_fraction_routes_to_control():
     """The router's boundary, which no real key is likely to land on.
 
@@ -389,17 +352,12 @@ def check_a_position_exactly_on_the_fraction_routes_to_control():
     assert r.arm("on") == canary.CONTROL, "a position equal to the fraction joined the slice"
     assert r.arm("above") == canary.CONTROL
 
-
 def check_the_four_verdicts_are_distinct_strings():
     verdicts = (canary.PROMOTE, canary.ROLLBACK, canary.HOLD, canary.REFUSE)
     assert len(set(verdicts)) == 4, "two verdicts collide: {}".format(verdicts)
     # And rollback is not the gate's reject. The CLI maps them to different exit codes and
     # a pipeline reads those, so an alias here would be a silent contract change.
     assert canary.ROLLBACK != gate.REJECT
-
-
-# --- observe and decide -----------------------------------------------------------
-
 
 def _observed(fraction=0.2, shadow=True, cand_epochs=1):
     spec, x, y, base_losses, worse_losses, rb, rw = _two_models(cand_epochs)
@@ -418,14 +376,12 @@ def _observed(fraction=0.2, shadow=True, cand_epochs=1):
         shadow=shadow,
     ) + (spec, y)
 
-
 def check_observe_splits_every_request_into_exactly_one_arm():
     arm_can, arm_con, pair, spec, y = _observed()
     assert arm_can.n + arm_con.n == len(y), "{} + {} against {}".format(
         arm_can.n, arm_con.n, len(y)
     )
     assert arm_can.n > 0 and arm_con.n > 0
-
 
 def check_observe_scores_each_arm_with_its_own_model():
     """A mutant handing both arms the same model would leave every count intact.
@@ -440,11 +396,9 @@ def check_observe_scores_each_arm_with_its_own_model():
     assert np.allclose(arm_con.row_losses, con_all[~mask])
     assert not np.allclose(can_all, con_all), "the fixture's two models score alike"
 
-
 def check_observe_returns_no_pair_when_shadow_is_off():
     _c, _n, pair, _s, _y = _observed(shadow=False)
     assert pair is None
-
 
 def check_observe_shadows_by_default():
     """The default is the argument nothing passes, so nothing was checking it.
@@ -457,7 +411,6 @@ def check_observe_shadows_by_default():
 
     sig = inspect.signature(canary.observe)
     assert sig.parameters["shadow"].default is True, sig.parameters["shadow"].default
-
 
 def check_observe_refuses_a_ragged_replay():
     spec = gate.spec_from_config(_cfg())
@@ -479,7 +432,6 @@ def check_observe_refuses_a_ragged_replay():
     except canary.CanaryError:
         return
     raise AssertionError("observe accepted one fewer key than labels")
-
 
 def check_observe_refuses_when_the_fraction_empties_an_arm():
     """Small n and a small fraction, which is how a real canary starts.
@@ -507,7 +459,6 @@ def check_observe_refuses_when_the_fraction_empties_an_arm():
     except canary.CanaryError:
         return
     raise AssertionError("observe routed every request to one arm and did not say so")
-
 
 def check_observe_allows_an_arm_of_exactly_one_request():
     """The other side of the emptiness guard.
@@ -567,7 +518,6 @@ def check_observe_allows_an_arm_of_exactly_one_request():
         assert out.reason == "too_few_requests", out.reason
         assert "cannot build an interval" in out.detail, out.detail
 
-
 def check_decide_refuses_two_arms_running_the_same_bytes():
     arm_can, arm_con, pair, spec, y = _observed()
     same = canary.ArmObservations(
@@ -580,7 +530,6 @@ def check_decide_refuses_two_arms_running_the_same_bytes():
     out = canary.decide(same, arm_con, "fp", 0.2, pair)
     assert out.verdict == canary.REFUSE, out.verdict
     assert out.reason == "same_artifact", out.reason
-
 
 def check_decide_refuses_a_non_finite_arm_from_either_side():
     """Two refusals with different reasons, the same shape as the gate's NaN pair.
@@ -608,7 +557,6 @@ def check_decide_refuses_a_non_finite_arm_from_either_side():
     assert "base" in second.detail, "the refusal does not name the control model"
     assert first.reason != second.reason
 
-
 def check_decide_reports_the_shadow_comparison_beside_the_split_one():
     arm_can, arm_con, pair, spec, y = _observed()
     out = canary.decide(arm_can, arm_con, "fp", 0.2, pair)
@@ -617,7 +565,6 @@ def check_decide_reports_the_shadow_comparison_beside_the_split_one():
     shadow_w = out.shadow[2] - out.shadow[1]
     assert split_w > shadow_w, "{:.4e} against {:.4e}".format(split_w, shadow_w)
     assert abs(out.extra["width_ratio"] - split_w / shadow_w) < 1e-9
-
 
 def check_decide_takes_its_verdict_from_the_split_and_not_the_shadow():
     """The verdict is a fact about the traffic that was actually served.
@@ -635,7 +582,6 @@ def check_decide_takes_its_verdict_from_the_split_and_not_the_shadow():
     )
     assert other.shadow[0] < 0.0, "the inverted pair did not reach the report"
 
-
 def check_decide_sizes_the_split_against_the_shadow_it_was_given():
     arm_can, arm_con, pair, spec, y = _observed()
     out = canary.decide(arm_can, arm_con, "fp", 0.2, pair)
@@ -648,7 +594,6 @@ def check_decide_sizes_the_split_against_the_shadow_it_was_given():
     without = canary.decide(arm_can, arm_con, "fp", 0.2, None)
     assert without.required is None, "sized a split with no paired target to size against"
 
-
 def check_decide_with_a_clearly_worse_canary_says_rollback_at_a_large_fraction():
     """Half the traffic and a model trained for one epoch. If the split cannot see this
     it cannot see anything, and the rest of the module's claims would be about a broken
@@ -658,7 +603,6 @@ def check_decide_with_a_clearly_worse_canary_says_rollback_at_a_large_fraction()
     out = canary.decide(arm_can, arm_con, "fp", 0.5, pair)
     assert out.verdict == canary.ROLLBACK, "{} {}".format(out.verdict, out.detail)
 
-
 def check_slice_imbalance_reports_both_arms_and_their_gap():
     spec = gate.spec_from_config(_cfg())
     _x, y = spec.rows()
@@ -667,7 +611,6 @@ def check_slice_imbalance_reports_both_arms_and_their_gap():
     assert abs((can - con) - gap) < 1e-12
     mask = canary.Router(fraction=0.2).assign(keys)
     assert abs(can - float(y[mask].mean())) < 1e-12
-
 
 def check_slice_imbalance_refuses_an_empty_arm_from_either_side():
     """Both terms of the guard.
@@ -687,10 +630,6 @@ def check_slice_imbalance_refuses_an_empty_arm_from_either_side():
             "slice_imbalance measured a gap against an empty arm at {}".format(fraction)
         )
 
-
-# --- the report -------------------------------------------------------------------
-
-
 def check_report_names_the_traffic_as_a_replay():
     """A number measured on generated data says so where it is used.
 
@@ -700,7 +639,6 @@ def check_report_names_the_traffic_as_a_replay():
     arm_can, arm_con, pair, spec, y = _observed()
     text = "\n".join(canary.report_lines(canary.decide(arm_can, arm_con, "fp", 0.2, pair)))
     assert "replay" in text and "not live traffic" in text, text[:200]
-
 
 def check_report_flags_the_two_comparisons_disagreeing():
     """A split that says hold and a shadow that says rollback is the finding, so the
@@ -722,7 +660,6 @@ def check_report_flags_the_two_comparisons_disagreeing():
     assert "the paired comparison on the same models says" in text
     assert shadow_v in text
 
-
 def check_report_prints_a_nan_arm_as_nan_rather_than_a_dash():
     """A number the arm never had and a number it computed as NaN are different facts."""
     arm_can, arm_con, pair, spec, y = _observed()
@@ -732,7 +669,6 @@ def check_report_prints_a_nan_arm_as_nan_rather_than_a_dash():
     text = "\n".join(canary.report_lines(canary.decide(bad, arm_con, "fp", 0.2, None)))
     assert "nan" in text
     assert canary.REFUSE in text
-
 
 def check_report_prints_a_table_row_for_each_arm():
     """Asserted against the table rows, not against the whole report.
@@ -751,7 +687,6 @@ def check_report_prints_a_table_row_for_each_arm():
     assert str(arm_con.n) in rows[0] and arm_con.model_name in rows[0], rows[0]
     assert str(arm_can.n) in rows[1] and arm_can.model_name in rows[1], rows[1]
 
-
 def check_the_detail_line_quotes_the_mean_the_verdict_came_from():
     """A detail reading an end of the interval instead of the middle still looks fine."""
     arm_can, arm_con, pair, spec, y = _observed()
@@ -762,7 +697,6 @@ def check_the_detail_line_quotes_the_mean_the_verdict_came_from():
     # The three are distinct, so a detail quoting one of them twice is a real difference
     # rather than something the fixture hides.
     assert len({out.split[0], out.split[1], out.split[2]}) == 3
-
 
 def check_report_works_when_there_is_no_shadow_to_report():
     """The `--no-shadow` path, which has a split and no pair.
@@ -779,16 +713,11 @@ def check_report_works_when_there_is_no_shadow_to_report():
     assert "shadow" not in text
     assert "times wider" not in text, "reported a ratio with nothing to compare against"
 
-
 def check_num_prints_a_missing_value_and_a_nan_differently():
     """Directly, because both branches are one line and the report reaches neither."""
     assert canary._num(None) == "-"
     assert canary._num(float("nan")) == "nan"
     assert canary._num(1.5) == "1.500000"
-
-
-# --- the CLI contract -------------------------------------------------------------
-
 
 def check_the_cli_maps_every_verdict_to_its_own_exit_code():
     """Four verdicts, four codes, no collisions.
@@ -813,7 +742,6 @@ def check_the_cli_maps_every_verdict_to_its_own_exit_code():
     assert codes[canary.PROMOTE] == 0, "a promotion must be the zero exit"
     assert mod.EXIT_HOLD != mod.EXIT_ROLLBACK, "hold and rollback share an exit code"
 
-
 def check_the_cli_help_works_without_mlflow():
     """`--help` must not need the optional dependency.
 
@@ -829,7 +757,6 @@ def check_the_cli_help_works_without_mlflow():
     text = mod.build_parser().format_help()
     for flag in ("--fraction", "--salt", "--no-shadow", "--promote"):
         assert flag in text, "{} is missing from the help".format(flag)
-
 
 def check_the_cli_has_no_rollback_flag():
     """A rollback verdict must not move the stage, and the first draft's flag did.
@@ -867,7 +794,6 @@ def check_the_cli_has_no_rollback_flag():
         "the canary script calls a rollback at line {}, which moves the stage the control "
         "arm is serving from".format(calls[0].lineno)
     )
-
 
 def check_the_cli_report_tags_carry_both_intervals():
     """Recording only the interval the verdict came from throws away the finding."""

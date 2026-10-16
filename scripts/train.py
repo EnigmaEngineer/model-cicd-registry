@@ -77,8 +77,11 @@ def main(argv=None) -> int:
             from mcr import registry
 
             reg = mlflow.MlflowClient(tracking_uri=args.track, registry_uri=args.track)
+            # Hands over the artefact rather than its hash, so the registry can apply
+            # its admission rule. A diverged config raises RegistryError here instead of
+            # coming back with a version number.
             version = registry.register(
-                reg, args.register, run_id, result.content_hash, cfg.fingerprint()
+                reg, args.register, run_id, result.artifact, cfg.fingerprint()
             )
 
     if not args.quiet:

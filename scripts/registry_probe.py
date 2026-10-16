@@ -183,8 +183,8 @@ def arm_ambiguous_reference(rep: Report, tmp: str) -> None:
 def arm_register_is_idempotent(rep: Report, tmp: str) -> None:
     cli = fresh(tmp + "/idem")
     digest = "a" * 64
-    first = registry.register(cli, MODEL, a_run(cli), digest, "fp0")
-    second = registry.register(cli, MODEL, a_run(cli), digest, "fp0")
+    first = registry.create_version(cli, MODEL, a_run(cli), digest, "fp0")
+    second = registry.create_version(cli, MODEL, a_run(cli), digest, "fp0")
 
     # The control is the store's own behaviour, which is what register wraps. Two
     # create_model_version calls with the same bytes give two versions, so the control
@@ -217,7 +217,7 @@ def arm_rollback_target(rep: Report, tmp: str) -> None:
     """
     cli = fresh(tmp + "/roll")
     versions = [
-        registry.register(cli, MODEL, a_run(cli), "{}{}".format(i, "b" * 63), "fp{}".format(i))
+        registry.create_version(cli, MODEL, a_run(cli), "{}{}".format(i, "b" * 63), "fp{}".format(i))
         for i in range(4)
     ]
     registry.promote(cli, MODEL, str(versions[0]), "production")
@@ -243,7 +243,7 @@ def arm_log_disagreement(rep: Report, tmp: str) -> None:
     """An alias moved outside promote must make rollback refuse rather than guess."""
     cli = fresh(tmp + "/disagree")
     versions = [
-        registry.register(cli, MODEL, a_run(cli), "{}{}".format(i, "c" * 63), "fp{}".format(i))
+        registry.create_version(cli, MODEL, a_run(cli), "{}{}".format(i, "c" * 63), "fp{}".format(i))
         for i in range(3)
     ]
     registry.promote(cli, MODEL, str(versions[0]), "production")
@@ -271,7 +271,7 @@ def arm_log_disagreement(rep: Report, tmp: str) -> None:
 
 def arm_no_op_promote(rep: Report, tmp: str) -> None:
     cli = fresh(tmp + "/noop")
-    v = registry.register(cli, MODEL, a_run(cli), "d" * 64, "fp")
+    v = registry.create_version(cli, MODEL, a_run(cli), "d" * 64, "fp")
     registry.promote(cli, MODEL, str(v), "production")
     again = registry.promote(cli, MODEL, str(v), "production")
     entries = len(registry.history(cli, MODEL, "production"))

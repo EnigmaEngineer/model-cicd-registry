@@ -104,7 +104,7 @@ def fresh(tmp: str, slot: str, versions: int = 5) -> mlflow.MlflowClient:
     for i in range(1, versions + 1):
         run = cli.create_run(experiment_id=exp)
         cli.set_terminated(run.info.run_id, status="FINISHED")
-        registry.register(cli, MODEL, run.info.run_id, "hash%04d" % i, "fp%04d" % i)
+        registry.create_version(cli, MODEL, run.info.run_id, "hash%04d" % i, "fp%04d" % i)
     return cli
 
 

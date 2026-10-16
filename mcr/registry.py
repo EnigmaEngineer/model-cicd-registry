@@ -30,6 +30,8 @@ from typing import Dict, List, Optional, Tuple
 
 import mlflow
 
+from . import admission
+from . import artifact as artifact_mod
 from .tracking import TAG_ARTIFACT_HASH, TAG_CONFIG_FINGERPRINT
 
 # The stages this project moves a model through. Deliberately not MLflow's vocabulary,
@@ -129,11 +131,25 @@ def register(
     cli: mlflow.MlflowClient,
     name: str,
     run_id: str,
-    artifact_hash: str,
+    art: artifact_mod.Artifact,
     config_fingerprint: str,
     source: Optional[str] = None,
 ) -> int:
-    """Put one artefact in the registry. Returns the version number.
+    """Put one trained model in the registry. Returns the version number.
+
+    This is the guarded door and it takes the artefact rather than its hash. Both halves of
+    that matter.
+
+    It takes the artefact because the admission rule needs the numbers, and being handed a
+    hash means being handed a name for bytes this function cannot read. The hash is then
+    derived here rather than supplied, which also removes a way for a caller to pass a hash
+    and a payload that disagree.
+
+    It refuses a non admissible artefact rather than reporting on it, because the thing on
+    the other side of this call is a version number that the gate, the deploy path and
+    every rollback will treat as a model. See `mcr/admission.py` for the two conditions and
+    what each one is worth. A caller that wants a version for bytes it is not claiming are
+    a model wants `create_version`.
 
     Idempotent on the artefact hash, and that is the whole point of it. The store is happy
     to create two versions from one run, and two versions holding identical bytes make
@@ -142,6 +158,46 @@ def register(
 
     Nothing keys on the run id. Two runs of one recipe get two run ids, so a run is the
     occasion and the artefact hash is the model.
+    """
+    verdict = admission.inspect(art.payload)
+    if not verdict.ok:
+        raise RegistryError(
+            "refusing to register under '{}': {}".format(name, verdict.why())
+        )
+
+    return create_version(
+        cli,
+        name,
+        run_id,
+        art.content_hash(),
+        config_fingerprint,
+        source=source,
+    )
+
+
+def create_version(
+    cli: mlflow.MlflowClient,
+    name: str,
+    run_id: str,
+    artifact_hash: str,
+    config_fingerprint: str,
+    source: Optional[str] = None,
+) -> int:
+    """Create one model version from a hash. The store primitive, and it checks nothing.
+
+    This is what `register` was before the admission rule, and it is still here because the
+    store's own behaviour has to be testable without a trained model in hand. Idempotency on
+    the hash, the tag value limits and the sorting of `versions` are all questions about
+    MLflow, and a fixture that had to train six models to ask them would be slower and no
+    clearer.
+
+    Call `register` for anything that is a model. This function is the unguarded path and a
+    caller reaching for it is saying the bytes behind the hash are not being claimed as one.
+
+    TODO: nothing stops a new caller reaching for this instead of the door. The check in
+    tests/test_deps.py that walks imports could also walk call sites and fail on one outside
+    tests/ and scripts/*_probe.py. Not done because the import walk reads `tree.body` and a
+    call site check has to read the whole tree, which is a different reader.
     """
     ensure_model(cli, name)
 

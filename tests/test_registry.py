@@ -22,7 +22,7 @@ import time
 
 import mlflow
 
-from mcr import registry
+from mcr import admission, artifact as artifact_mod, registry
 from mcr.tracking import TAG_ARTIFACT_HASH, TAG_CONFIG_FINGERPRINT
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,31 +80,31 @@ def a_run(cli) -> str:
 
 def some_versions(cli, model: str, n: int):
     return [
-        registry.register(
+        registry.create_version(
             cli, model, a_run(cli), "{:02d}{}".format(i, "f" * 62), "fp{}".format(i)
         )
         for i in range(n)
     ]
 
 
-def check_register_returns_increasing_versions():
+def check_create_version_returns_increasing_versions():
     with Store() as (cli, MODEL):
         got = some_versions(cli, MODEL, 3)
         assert got == [1, 2, 3], got
 
 
-def check_register_is_idempotent_on_the_artefact_hash():
+def check_create_version_is_idempotent_on_the_artefact_hash():
     with Store() as (cli, MODEL):
         digest = "a" * 64
-        first = registry.register(cli, MODEL, a_run(cli), digest, "fp")
-        second = registry.register(cli, MODEL, a_run(cli), digest, "fp")
+        first = registry.create_version(cli, MODEL, a_run(cli), digest, "fp")
+        second = registry.create_version(cli, MODEL, a_run(cli), digest, "fp")
         assert first == second, (first, second)
         assert len(registry.versions(cli, MODEL)) == 1
 
 
-def check_register_tags_both_identities():
+def check_create_version_tags_both_identities():
     with Store() as (cli, MODEL):
-        registry.register(cli, MODEL, a_run(cli), "b" * 64, "fp0")
+        registry.create_version(cli, MODEL, a_run(cli), "b" * 64, "fp0")
         tags = cli.get_model_version(MODEL, "1").tags
         assert tags[TAG_ARTIFACT_HASH] == "b" * 64
         assert tags[TAG_CONFIG_FINGERPRINT] == "fp0"
@@ -114,8 +114,8 @@ def check_two_runs_of_one_recipe_are_one_version():
     """The same bytes from two occasions. The registry holds models, not occasions."""
     with Store() as (cli, MODEL):
         digest = "c" * 64
-        a = registry.register(cli, MODEL, a_run(cli), digest, "fp")
-        b = registry.register(cli, MODEL, a_run(cli), digest, "fp")
+        a = registry.create_version(cli, MODEL, a_run(cli), digest, "fp")
+        b = registry.create_version(cli, MODEL, a_run(cli), digest, "fp")
         assert a == b
         assert len(registry.versions(cli, MODEL)) == 1
 
@@ -512,16 +512,16 @@ def check_the_transition_time_is_the_clock_in_milliseconds():
             assert before <= value <= after, (label, value, before, after)
 
 
-def check_register_points_the_version_at_the_run_that_made_it():
+def check_create_version_points_the_version_at_the_run_that_made_it():
     with Store() as (cli, MODEL):
         run = a_run(cli)
-        registry.register(cli, MODEL, run, "e" * 64, "fp")
+        registry.create_version(cli, MODEL, run, "e" * 64, "fp")
         assert cli.get_model_version(MODEL, "1").source == "runs:/{}/model".format(run)
 
 
 def check_an_explicit_source_is_used_instead():
     with Store() as (cli, MODEL):
-        registry.register(
+        registry.create_version(
             cli, MODEL, a_run(cli), "f" * 64, "fp", source="s3://bucket/model"
         )
         assert cli.get_model_version(MODEL, "1").source == "s3://bucket/model"
@@ -712,3 +712,124 @@ def check_an_unconfirmed_entry_cannot_be_edited():
     except Exception:
         return
     raise AssertionError("an Unconfirmed accepted an edit")
+
+
+# These check that `register` is a door and `create_version` is not. Which configs map to
+# which verdict is tests/test_admission.py's subject and is not re-asked here, so the
+# payloads below are the smallest thing that is admissible or is not. That keeps this
+# module's runtime where a mutation pass can afford it, since it is the oracle for
+# mcr/registry.py.
+
+
+def an_artifact(admissible: bool, tag: str = "x") -> artifact_mod.Artifact:
+    """A payload on one side of the rule or the other, and otherwise uninteresting.
+
+    `tag` moves the bytes, which moves the content hash. Two checks needing two distinct
+    admissible artefacts cannot share one, because `register` is idempotent on the hash and
+    would hand the second one the first one's version.
+    """
+    weights = [0.25, -0.5] if admissible else [float("nan"), 0.1]
+    return artifact_mod.Artifact(payload={
+        "artifact_version": 1,
+        "name": "fixture-{}".format(tag),
+        "seed": 1,
+        "model": {"weights": weights, "bias": 0.1, "epochs_run": 10},
+        "metrics": {"holdout_log_loss": 0.5},
+    })
+
+
+def check_register_accepts_an_admissible_artefact():
+    with Store() as (cli, MODEL):
+        v = registry.register(cli, MODEL, a_run(cli), an_artifact(True), "fp")
+        assert v == 1, v
+
+
+def check_register_refuses_an_artefact_that_did_not_train():
+    """The defect this door was built for. A NaN artefact used to come back with a version."""
+    with Store() as (cli, MODEL):
+        art = an_artifact(False)
+        try:
+            registry.register(cli, MODEL, a_run(cli), art, "fp")
+        except registry.RegistryError as exc:
+            assert "model.weights[0] is nan" in str(exc), str(exc)
+            assert MODEL in str(exc), str(exc)
+        else:
+            raise AssertionError("register accepted a non finite artefact")
+
+
+def check_a_refused_artefact_leaves_no_version_behind():
+    """A refusal that has already written is not a refusal.
+
+    `ensure_model` creates the registered model and the old `register` called it first, so
+    the ordering here is the thing being checked rather than a detail. The refusal has to
+    come before anything touches the store.
+    """
+    with Store() as (cli, MODEL):
+        try:
+            registry.register(cli, MODEL, a_run(cli), an_artifact(False), "fp")
+        except registry.RegistryError:
+            pass
+        assert registry.versions(cli, MODEL) == [], registry.versions(cli, MODEL)
+
+
+def check_the_refusal_names_every_reason_it_found():
+    """A diverged model fails two ways and an operator reading one of them fixes half.
+
+    The weights here are huge and finite, which is the shape `candidate-inverted` actually
+    has. The first version of this fixture used an infinite weight and failed, because a non
+    finite parameter scale suppresses the saturation line on purpose. Saying a number is not
+    a number and then comparing it to a threshold tells a reader nothing. So an artefact
+    reaches two reasons by being saturated in its parameters and non finite somewhere else,
+    which is exactly what the l2 10 config does through `model.final_loss`.
+    """
+    art = artifact_mod.Artifact(payload={
+        "name": "both",
+        "model": {"weights": [1e300, -1e300], "bias": 0.0},
+        "metrics": {"holdout_log_loss": float("nan")},
+    })
+    verdict = admission.inspect(art.payload)
+    assert len(verdict.reasons) >= 2, verdict.reasons
+
+    with Store() as (cli, MODEL):
+        try:
+            registry.register(cli, MODEL, a_run(cli), art, "fp")
+        except registry.RegistryError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("register accepted it")
+
+    assert "nan" in message, message
+    assert "logit scale" in message, message
+
+
+def check_register_derives_the_hash_from_the_artefact():
+    """It is handed the artefact, so a caller can no longer pass a hash that disagrees."""
+    with Store() as (cli, MODEL):
+        art = an_artifact(True, tag="derive")
+        registry.register(cli, MODEL, a_run(cli), art, "fp0")
+        tags = cli.get_model_version(MODEL, "1").tags
+        assert tags[TAG_ARTIFACT_HASH] == art.content_hash(), tags[TAG_ARTIFACT_HASH]
+        assert len(tags[TAG_ARTIFACT_HASH]) == 64
+
+
+def check_register_is_still_idempotent_on_the_artefact():
+    """The property create_version has, through the door rather than round it."""
+    with Store() as (cli, MODEL):
+        art = an_artifact(True, tag="idem")
+        first = registry.register(cli, MODEL, a_run(cli), art, "fp")
+        second = registry.register(cli, MODEL, a_run(cli), art, "fp")
+        assert first == second, (first, second)
+        assert len(registry.versions(cli, MODEL)) == 1
+
+
+def check_create_version_is_the_unguarded_path_and_says_so():
+    """Asserted rather than trusted to a docstring.
+
+    `create_version` exists so the store's own behaviour stays testable without a trained
+    model. That means it does not check, and a future edit moving the admission rule into
+    it would break every fixture in this module that registers a fabricated hash. If that
+    is ever the right change, this check is where the decision gets made again.
+    """
+    with Store() as (cli, MODEL):
+        v = registry.create_version(cli, MODEL, a_run(cli), "f" * 64, "fp")
+        assert v == 1, v

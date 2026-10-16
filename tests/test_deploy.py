@@ -57,7 +57,7 @@ def a_run(cli) -> str:
 def ready(cli, model, versions=4, production="1"):
     """Versions registered and production pointed somewhere, which most checks need."""
     for i in range(versions):
-        registry.register(
+        registry.create_version(
             cli, model, a_run(cli), "{:02d}{}".format(i, "d" * 62), "fp{}".format(i)
         )
     if production is not None:

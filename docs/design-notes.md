@@ -687,3 +687,75 @@ sit beside it in the report. When they disagree the report says so.
 That only works for a metric computable without knowing what was served. Log loss is. A
 click on the recommendation that was shown is not, and for those the split is the only
 comparison there is and the bill above is real. `docs/adr-0005` carries both halves.
+
+## Admission, and the metric that was finite anyway
+
+The registry used to take a hash and a fingerprint. Two strings, both opaque to it, and that
+is the reason a NaN artefact could reach it. A function handed a name for some bytes has no
+way to ask anything about the bytes. So `register` now takes the artefact, derives the hash
+itself, and applies the rule in `mcr/admission.py` before the store is touched.
+
+The rule that was easy to write is finiteness. Every float in the payload has to be finite,
+and the walk reads the payload rather than a list of field names, because a list is a thing
+somebody has to remember to edit.
+
+The rule that took a measurement is the other one. `configs/candidate-diverged.yml` at `l2`
+100 was the config this work started from, and it is the easy case. It produces NaNs
+everywhere and any finiteness check catches it. The interesting config was
+`configs/candidate-inverted.yml` at `l2` 10:
+
+```
+l2       log_loss   roc_auc      accuracy   max|w|      overflow warnings
+0.001    0.4492     0.675518     0.8160     0.4648      0
+1        0.4732     0.675340     0.8148     0.05653     0
+10       19.7013    0.377109     0.4296     4.867e+238  141
+30       nan        0.515824     0.8148     nan         141
+60       nan        0.515824     0.8148     nan         110
+100      nan        0.515824     0.8148     nan         100
+```
+
+Read the `l2` 10 row again. Every metric is a real number. The accuracy is worse than a coin
+and the AUC is below a half, so the model is useless, but nothing about those three values is
+non finite. A rule reading `metrics` and stopping there registers it.
+
+The reason they are finite is `model.log_loss`, which clips probabilities to 1e-15 before
+taking a log. That clip exists so a confident correct prediction does not produce an
+infinity, which is right. It also means the loss of a model whose probabilities are all
+exactly 0 or 1 is a function of the clip rather than of the fit. Finiteness of a loss carries
+no information about whether anything converged, and that was the assumption worth throwing
+out.
+
+Two things catch the `l2` 10 case, and they are independent. Walking the whole payload finds
+`model.final_loss`, which carries the `0.5 * l2 * (w @ w)` term and overflows to an infinity.
+And the parameter scale is nine orders of magnitude past the point where the sigmoid has
+stopped being able to return a probability.
+
+That point is derivable. `1 / (1 + exp(-z))` rounds to exactly 1.0 once `exp(-z)` drops below
+half an epsilon, at `z` of 36.736801. Measured by scaling the fitted direction up on the
+baseline holdout:
+
+```
+weight scale   rows at exactly 0 or 1   distinct probabilities over 5,000 rows
+1              0.0 percent              5000
+10             0.0 percent              4999
+100            36.3 percent             3139
+1e4            96.9 percent             159
+1e6            99.9 percent             5
+1e10           100 percent              2
+```
+
+The statistic compared against that is the weight norm plus the absolute bias. It bounds the
+logit at a one sigma standardised input and understates what the model can reach by about the
+square root of the feature count, since a real row carries all twelve features at once.
+Understating is the direction a door should err in.
+
+One note on the norm. `np.linalg.norm` on the `l2` 10 weight vector returns `inf`, because
+squaring 4.867e+238 does not fit in a float64. The verdict would have come back as a refusal
+anyway and for the wrong reason, which is the kind of agreement that hides a defect rather
+than finding one. `admission.parameter_norm` factors the largest element out first.
+
+What stayed permissive was deliberate. `train.run` still returns a diverged fit and
+`artifact.build` still serialises one. Either could refuse earlier and refusing there would
+stop the promotion gate and the canary ever being handed a non finite candidate, which both
+have tested refusals for. A guard that makes another guard untestable is a bad trade. The
+reasoning is in [adr-0009](adr-0009-admission-is-a-separate-question-from-promotion.md).

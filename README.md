@@ -125,6 +125,30 @@ no runner, so the file was read rather than executed. The first real run failed 
 job, because the canary had no incumbent to compare against. The workflow test now hands
 every script call in the file to that script's own argument parser.
 
+**The registry refuses an artefact that never trained, and one of the two refusals was not
+enough on its own.** `register` takes the artefact rather than its hash and applies an
+admission rule before the store is touched. Measured end to end against a sqlite store.
+
+```
+config                 logit scale    admitted   why not
+baseline               2.23082        yes        -
+candidate-close        1.69692        yes        -
+candidate-lr           2.23082        yes        -
+candidate-underfit     0.20277        yes        -
+candidate-inverted     6.038e+238     no         non finite parameter, saturated
+candidate-diverged     nan            no         non finite metric, non finite parameter
+
+  three configs through scripts/train.py --register:
+  1 registered version, 2 refused with exit 1, 5 tracking runs logged
+```
+
+`candidate-inverted` is the case worth the attention. At `l2` 10 it diverges with every
+metric finite. Holdout log loss is 19.70 and AUC is 0.377109, both real numbers, against a
+baseline AUC of 0.6755. A rule reading only the recorded metrics admits it. It is caught on
+`model.final_loss`, which carries the l2 penalty and overflows, and caught again on the
+parameter scale. The threshold for that second rule is `log(2 / eps)`, or 36.736801, which
+is the logit at which a float64 sigmoid stops being able to return anything below 1.
+
 ## Known limitations
 
 - The corpus is synthetic. No accuracy number here means anything about the world.
@@ -133,7 +157,8 @@ every script call in the file to that script's own argument parser.
 - The drills simulate a crash. They do not cause one.
 - `--require-gate` is off by default, so the unguarded promotion is still the default path.
 - The gate requirement reads a mutable MLflow tag. It is not a security control.
-- A config that trains to a NaN loss still reaches the registry.
+- Admission asks whether a model trained, never whether it is any good. `candidate-underfit` passes it and is meant to.
+- `create_version` is the unguarded store primitive and is reachable, so the admission rule can be walked around by calling it.
 - `promote` cannot survive two writers.
 - The nine gate cases were written by the same person who wrote the gate.
 
@@ -161,6 +186,7 @@ differently.
 - [What the first pass found](docs/design-notes.md#what-the-first-pass-found)
 - [Seeds](docs/design-notes.md#seeds)
 - [The canary, and the measurement it cannot make](docs/design-notes.md#the-canary-and-the-measurement-it-cannot-make)
+- [Admission, and the metric that was finite anyway](docs/design-notes.md#admission-and-the-metric-that-was-finite-anyway)
 
 **[Running the checks](docs/running-the-checks.md)**
 
@@ -174,3 +200,4 @@ differently.
 - [adr-0006-a-crash-mid-deploy-can-make-rollback-pick-a-version-that-never-served](docs/adr-0006-a-crash-mid-deploy-can-make-rollback-pick-a-version-that-never-served.md)
 - [adr-0007-the-audit-trail-was-biased-toward-wins](docs/adr-0007-the-audit-trail-was-biased-toward-wins.md)
 - [adr-0008-a-published-byte-count-was-measuring-my-filesystem](docs/adr-0008-a-published-byte-count-was-measuring-my-filesystem.md)
+- [adr-0009-admission-is-a-separate-question-from-promotion](docs/adr-0009-admission-is-a-separate-question-from-promotion.md)

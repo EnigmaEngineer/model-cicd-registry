@@ -81,12 +81,29 @@ is a different problem from the one this solves.
 keys are zero padded and only their order matters. It halves the headroom in the limitation
 two entries below this one.
 
-**A config that trains to a NaN loss still reaches the registry.** `l2: 100` overflows in
-`mcr/model.py`, training returns a model, the artefact gets a hash and `registry.register`
-takes it. The gate refuses to compare it and the gate is not on the registration path, so a
-broken model can still be registered. It just cannot be promoted. Moving the check earlier
-would mean `register` computing a metric, which means `register` knowing about holdouts, and
-that is a worse shape than the gap.
+**Admission asks whether a model trained, not whether it is worth anything.** The rule in
+`mcr/admission.py` refuses a non finite artefact and one whose parameters have saturated the
+sigmoid. `configs/candidate-underfit.yml` passes it, scores 0.6419 holdout log loss against
+the baseline's 0.4492, and is admitted on purpose. Judging quality is the promotion gate's
+job. A rule doing both would be two rules sharing a name and the weaker one would win
+arguments it should lose.
+
+**The saturation threshold is derived and still a judgement at the margin.** `log(2 / eps)`
+is where a float64 sigmoid stops returning anything below 1, which is a fact. That this
+makes a good admission boundary is an argument. Nothing shipped here lands near it, with the
+five training configs between 0.20277 and 2.23082 and the diverged one at 6.038e+238, so the
+placement is untested in the range where it would matter. A model legitimately needing a
+logit scale above 36 would be refused and the message would not help much.
+
+**`create_version` is reachable and unguarded.** The store primitive `register` is built on
+still exists, because the store's own behaviour has to be testable without training a model
+first. Anything calling it goes round the admission rule. The checks record that this is a
+decision rather than an oversight and nothing enforces it.
+
+**A refused registration still leaves a tracking run behind.** `scripts/train.py` logs the
+run before it registers, so a diverged config produces a tracking record and no registered
+version. Verified at three configs to five runs and one version. That split is intended, and
+it does mean the tracking store and the registry disagree about how many models exist.
 
 **The holdout is not frozen in the usual sense.** `--holdout` defaults to
 `configs/baseline.yml`, so the rows come from regenerating the incumbent recipe's own

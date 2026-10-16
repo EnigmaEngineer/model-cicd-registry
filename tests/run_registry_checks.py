@@ -2,9 +2,10 @@
 
     python3 tests/run_registry_checks.py
 
-Measured on this machine: 15.4 seconds and 81 checks, against 28.6 seconds and 299 for
-tests/run_with_mlflow.py. Both figures come from the runs recorded in docs/adr-0006 and
-either can be reproduced by timing the two commands.
+Measured on this machine: 14.5 seconds and 92 checks, against 32.1 seconds and 343 for
+tests/run_with_mlflow.py. Re-timed whenever either count moves, because a published count
+is a claim about the file it sits in. The previous figures here said 81 and 299 and went
+stale the moment this module's list grew.
 
 There are two reasons for it and the second is the one that made it necessary.
 
@@ -13,8 +14,8 @@ are the single most expensive thing in the full run and no mutation of either mo
 reach them.
 
 And a mutation pass needs an oracle that fits inside one call. A pass runs its oracle once
-per mutation site and mcr/registry.py has 47 of them, so the full runner is twenty two
-minutes of suite and the shell that drives it is killed at about 178 seconds. At 15.4
+per mutation site and mcr/registry.py has 47 of them, so the full runner is twenty six
+minutes of suite and the shell that drives it is killed at about 178 seconds. At 14.5
 seconds a slice of eight sites plus its two controls fits with room to spare.
 
 A narrower oracle is only honest if nothing outside it can kill a mutant in the modules it

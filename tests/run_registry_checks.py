@@ -2,10 +2,12 @@
 
     python3 tests/run_registry_checks.py
 
-Measured on this machine: 14.5 seconds and 92 checks, against 32.1 seconds and 343 for
-tests/run_with_mlflow.py. Re-timed whenever either count moves, because a published count
-is a claim about the file it sits in. The previous figures here said 81 and 299 and went
-stale the moment this module's list grew.
+This runner comes in at roughly 14 to 15 seconds over repeated runs against roughly 33 for
+tests/run_with_mlflow.py. Both move by a large factor with the filesystem the tree sits on,
+so re-time before sizing a mutation slice rather than trusting those. No check count is
+written here on purpose. Two of them were typed into this docstring and into the README,
+both went stale by more than thirty, and the counts now live in tests/test_readme.py where
+something derives them.
 
 There are two reasons for it and the second is the one that made it necessary.
 
@@ -38,8 +40,8 @@ from tests.runner import run_checks  # noqa: E402
 # The modules that import mcr.registry or mcr.deploy. Written out rather than derived,
 # because a list derived from the same import scan the check below performs would agree
 # with it whatever either one did.
-COVERS = ("mcr/registry.py", "mcr/deploy.py")
-MODULES = ["tests.test_registry", "tests.test_deploy"]
+COVERS = ("mcr/registry.py", "mcr/deploy.py", "mcr/attest.py")
+MODULES = ["tests.test_registry", "tests.test_deploy", "tests.test_attest"]
 
 
 def main(argv) -> int:

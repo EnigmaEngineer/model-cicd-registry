@@ -22,7 +22,7 @@ import time
 
 import mlflow
 
-from mcr import admission, artifact as artifact_mod, registry
+from mcr import admission, artifact as artifact_mod, attest, registry
 from mcr.tracking import TAG_ARTIFACT_HASH, TAG_CONFIG_FINGERPRINT
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -833,3 +833,183 @@ def check_create_version_is_the_unguarded_path_and_says_so():
     with Store() as (cli, MODEL):
         v = registry.create_version(cli, MODEL, a_run(cli), "f" * 64, "fp")
         assert v == 1, v
+
+
+def _attested(to, frm, kind=registry.PROMOTE):
+    return dataclasses.replace(_t(to, frm, kind), attestation=attest.ATTESTED)
+
+
+def _forged(to, frm, kind=registry.PROMOTE):
+    return dataclasses.replace(_t(to, frm, kind), attestation=attest.FORGED)
+
+
+def check_authentic_keeps_a_clean_signed_log():
+    """The control, and the rest of this group means nothing without it."""
+    log = [_attested(1, None), _attested(2, 1), _attested(3, 2)]
+    kept, rejected = registry.authentic(log)
+    assert kept == log, kept
+    assert rejected == []
+
+
+def check_authentic_keeps_a_log_that_predates_the_signature():
+    """A history written before any of this still has to answer.
+
+    A rule that refused an unsigned log would refuse every store this code has ever been
+    pointed at, which is the shape where a safety check gets switched off and stays off.
+    """
+    log = [_t(1, None), _t(2, 1), _t(3, 2)]
+    kept, rejected = registry.authentic(log)
+    assert kept == log, kept
+    assert rejected == []
+
+
+def check_authentic_rejects_a_forged_entry():
+    kept, rejected = registry.authentic([_attested(1, None), _forged(9, 1), _attested(3, 2)])
+    assert len(kept) == 2, kept
+    assert len(rejected) == 1, rejected
+    assert rejected[0].position == 1
+    assert "signature" in rejected[0].reason
+
+
+def check_authentic_rejects_an_unsigned_entry_inside_a_signed_log():
+    """The cheapest forgery is to leave the signature off, so this is the one that counts.
+
+    The first version of this rule accepted an unsigned entry unconditionally. That made
+    the signature worth nothing, because anybody who can overwrite a tag can write one
+    without a signature, and that is easier than faking one.
+    """
+    kept, rejected = registry.authentic([_attested(1, None), _t(9, 1), _attested(3, 2)])
+    assert len(rejected) == 1, rejected
+    assert rejected[0].position == 1
+    assert "the rest of this log is signed" in rejected[0].reason
+
+
+def check_require_attested_refuses_a_log_that_predates_the_signature():
+    """The knob only tightens. It is for a caller that will not read a legacy log at all."""
+    log = [_t(1, None), _t(2, 1)]
+    kept, rejected = registry.authentic(log, require_attested=True)
+    assert kept == []
+    assert len(rejected) == 2, rejected
+    assert "one was required" in rejected[0].reason
+
+
+def check_settle_does_not_look_at_who_wrote_an_entry():
+    """The separation, asserted rather than left to the two docstrings.
+
+    A forged entry whose `from_version` chains correctly is indistinguishable to the
+    recovery rule, because the forger picks that field. If a later edit folded the
+    signature check into `settle` this check is where that decision gets made again.
+    """
+    log = [_attested(1, None), _forged(2, 1), _attested(3, 2)]
+    kept, dropped = registry.settle(log, 3)
+    assert kept == log, kept
+    assert dropped == []
+
+
+def check_a_forged_entry_is_refused_rather_than_dropped():
+    """Through the store, and the refusal has to be the specific one.
+
+    An unconfirmed entry is dropped and the walk continues. This is not that, and a caller
+    cannot tell the two apart from a bare RegistryError.
+    """
+    key = b"checks-key"
+    with Store() as (cli, MODEL):
+        some_versions(cli, MODEL, 3)
+        for v in ("1", "2", "3"):
+            registry.promote(cli, MODEL, v, "production", key=key)
+        cli.set_registered_model_tag(MODEL, registry._slot("production", 1), json.dumps(
+            {"body": _t(9, 1).as_value(), "mac": "00" * 32},
+            sort_keys=True, separators=(",", ":"),
+        ))
+        try:
+            registry.rollback_target(cli, MODEL, "production", key=key)
+        except registry.UnauthenticEntry as exc:
+            assert "cannot be attributed" in str(exc), str(exc)
+        else:
+            raise AssertionError("a forged transition log entry was accepted")
+
+
+def check_the_unauthentic_refusal_is_catchable_as_a_registry_error():
+    """Additive by construction, so every existing handler still works."""
+    assert issubclass(registry.UnauthenticEntry, registry.RegistryError)
+
+
+def check_promote_writes_a_signed_entry_when_a_key_is_present():
+    """And reads it back as attested, which is the end to end of the writing half."""
+    key = b"checks-key"
+    with Store() as (cli, MODEL):
+        some_versions(cli, MODEL, 3)
+        registry.promote(cli, MODEL, "1", "production", key=key)
+        log = registry.history(cli, MODEL, "production", key=key)
+        assert [e.attestation for e in log] == [attest.ATTESTED], log
+
+
+def check_promote_writes_an_unsigned_entry_when_there_is_no_key():
+    """The default, and it has to stay readable rather than becoming an error."""
+    with Store() as (cli, MODEL):
+        some_versions(cli, MODEL, 3)
+        registry.promote(cli, MODEL, "1", "production", key=None)
+        log = registry.history(cli, MODEL, "production", key=None)
+        assert [e.attestation for e in log] == [attest.UNATTESTED], log
+
+
+def check_attestation_is_never_part_of_the_signed_body():
+    """It describes the tag, not the transition. Signing over it would make the signature
+    depend on the reading of itself."""
+    body = _attested(2, 1).as_value()
+    assert "attestation" not in body, body
+    assert body == _t(2, 1).as_value()
+
+
+def check_history_refuses_a_slot_that_does_not_parse():
+    """A corrupt tag under the history prefix is named rather than skipped.
+
+    Skipping it would leave a gap, and the witness rule reads a gap as a crash, so a
+    corrupt entry would be laundered into a recovered one.
+    """
+    with Store() as (cli, MODEL):
+        some_versions(cli, MODEL, 3)
+        registry.promote(cli, MODEL, "1", "production")
+        cli.set_registered_model_tag(MODEL, registry._slot("production", 1), "{broken")
+        try:
+            registry.history(cli, MODEL, "production")
+        except registry.RegistryError as exc:
+            assert "does not hold a readable entry" in str(exc), str(exc)
+        else:
+            raise AssertionError("an unreadable transition log slot was skipped")
+
+
+def check_an_unattributed_entry_cannot_be_edited():
+    """Same reason as Unconfirmed. Evidence a caller can rewrite is not evidence."""
+    _, rejected = registry.authentic([_attested(1, None), _forged(9, 1)])
+    try:
+        rejected[0].reason = "fine actually"
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("an Unattributed accepted an edit")
+
+
+def check_a_log_with_no_signed_entry_cannot_be_defended_by_default():
+    """The hole in the policy, asserted so nobody finds it in an interview instead.
+
+    The no downgrade rule needs at least one entry it verified, to know that the writer of
+    this log holds the key. A model the real pipeline has never promoted has no such entry,
+    so a log written start to finish by somebody else reads as a legacy log and is
+    accepted. The rollback target is then whatever they chose.
+
+    This cannot be fixed in the default, because a store full of genuine legacy logs is
+    indistinguishable from this by construction. `require_attested` is the answer and the
+    check below is the pair to this one.
+    """
+    forged = [_t(1, None), _t(2, 1), _t(3, 2)]
+    kept, rejected = registry.authentic(forged)
+    assert rejected == [], rejected
+    assert registry.walk_back(registry.settle(kept, 3)[0], 3) == 2
+
+
+def check_require_attested_closes_the_wholly_unsigned_log():
+    """The pair to the check above, and the reason that parameter is not dead code."""
+    forged = [_t(1, None), _t(2, 1), _t(3, 2)]
+    kept, rejected = registry.authentic(forged, require_attested=True)
+    assert kept == []
+    assert len(rejected) == 3, rejected

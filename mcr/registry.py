@@ -32,6 +32,7 @@ import mlflow
 
 from . import admission
 from . import artifact as artifact_mod
+from . import attest
 from .tracking import TAG_ARTIFACT_HASH, TAG_CONFIG_FINGERPRINT
 
 # The stages this project moves a model through. Deliberately not MLflow's vocabulary,
@@ -50,6 +51,14 @@ SEQ_WIDTH = 4
 
 class RegistryError(RuntimeError):
     """Raised when the registry cannot answer which model something refers to."""
+
+
+class UnauthenticEntry(RegistryError):
+    """Raised when the transition log holds an entry this process cannot attribute.
+
+    A subclass rather than a sibling, so every existing `except RegistryError` still
+    catches it and the change stays additive.
+    """
 
 
 PROMOTE = "promote"
@@ -73,6 +82,10 @@ class Transition:
     # move and nothing went into the log. A bool rather than a sentinel timestamp, because
     # a caller checking `at_ms == 0` is reading a magic number to answer a real question.
     logged: bool = True
+    # Whether the tag this entry was read out of carried a signature this process could
+    # check. It describes the tag and not the transition, so `as_value` never emits it and
+    # no signature is ever taken over it. See mcr/attest.py.
+    attestation: str = attest.UNATTESTED
 
     def as_value(self) -> str:
         return json.dumps(
@@ -263,13 +276,20 @@ def current(cli: mlflow.MlflowClient, name: str, stage: str) -> Optional[int]:
     return int(cli.get_model_version_by_alias(name, stage).version)
 
 
+def _slot(stage: str, seq: int) -> str:
+    """The tag key one transition lives at. Signed material, so it has one builder."""
+    return "{}.{}.{:0{}d}".format(HISTORY_PREFIX, stage, seq, SEQ_WIDTH)
+
+
 def _next_seq(tags: Dict[str, str], stage: str) -> int:
     prefix = "{}.{}.".format(HISTORY_PREFIX, stage)
     used = [int(k[len(prefix):]) for k in tags if k.startswith(prefix)]
     return max(used) + 1 if used else 0
 
 
-def history(cli: mlflow.MlflowClient, name: str, stage: str) -> List[Transition]:
+def history(
+    cli: mlflow.MlflowClient, name: str, stage: str, key=attest.USE_ENV
+) -> List[Transition]:
     """Every transition of one stage, oldest first.
 
     Read out of the registered model's tags rather than off the versions, because the
@@ -283,9 +303,22 @@ def history(cli: mlflow.MlflowClient, name: str, stage: str) -> List[Transition]
         return []
 
     prefix = "{}.{}.".format(HISTORY_PREFIX, stage)
+    verify_key = attest.resolve_key(key)
     out = []
     for key in sorted(k for k in tags if k.startswith(prefix)):
-        body = json.loads(tags[key])
+        state, text = attest.unseal(key, tags[key], verify_key)
+        try:
+            body = json.loads(text)
+        except ValueError as exc:
+            # A tag under the history prefix that does not parse is a corrupt log rather
+            # than an unsigned one, and naming the slot is the only way an operator finds
+            # it. Refusing here rather than skipping, because a skipped entry would leave
+            # a gap the witness rule reads as a crash.
+            raise RegistryError(
+                "transition log slot {} does not hold a readable entry: {}".format(
+                    key, exc
+                )
+            )
         out.append(
             Transition(
                 stage=body["stage"],
@@ -293,6 +326,7 @@ def history(cli: mlflow.MlflowClient, name: str, stage: str) -> List[Transition]
                 from_version=body["from"],
                 at_ms=body["at_ms"],
                 kind=body["kind"],
+                attestation=state,
             )
         )
     return out
@@ -328,9 +362,13 @@ def settle(log: List[Transition], alias_now: Optional[int]) -> Tuple[
     whether the alias moved and neither the log nor the store holds it any more.
 
     The witness rule holds for entries `promote` and `retire` write, because both read the
-    live alias into `from_version` immediately before writing. It is not a defence against
-    a forged entry. The log is a set of registered model tags and anything with write access
-    to the store can add one, so this recovers a crash and does not authenticate a writer.
+    live alias into `from_version` immediately before writing.
+
+    This answers one question and it is recovery. It takes the log and the live alias and
+    nothing else, which is the whole reason it cannot answer the other one. Who wrote an
+    entry is `authentic`, which needs a key, and the two are composed in that order by
+    `rollback_target`. Running them the other way round hides an attack, and
+    `scripts/drill.py` measures it rather than asserting it.
     """
     kept: List[Transition] = []
     dropped: List[Unconfirmed] = []
@@ -371,8 +409,93 @@ def settle(log: List[Transition], alias_now: Optional[int]) -> Tuple[
     return kept, dropped
 
 
+@dataclass(frozen=True)
+class Unattributed:
+    """A log entry whose writer this process cannot vouch for."""
+
+    position: int
+    entry: Transition
+    reason: str
+
+
+def authentic(
+    log: List[Transition], require_attested: bool = False
+) -> Tuple[List[Transition], List[Unattributed]]:
+    """Split a log by who wrote it. The question `settle` does not ask.
+
+    This is a different question from whether a move happened, it needs a different input,
+    and that is why it is a different function. A forged entry can satisfy the witness rule
+    perfectly, because the forger chooses `from_version`.
+
+    A rejected entry is not dropped quietly the way an unconfirmed one is. `settle` drops a
+    crash artefact because the missing fact is unrecoverable and the log is still the
+    store's own account of itself. An entry that fails here says somebody else has been
+    writing to the history, which is a fact about the store rather than about one move.
+
+    An unsigned entry is the case that decides whether any of this is worth having, and
+    the first rule written here was wrong about it. Rejecting every unsigned entry refuses
+    every log that predates the signature. Accepting every unsigned entry defends against
+    nothing, because an attacker who can write a tag can leave the signature off, and then
+    the cheapest forgery there is walks straight through.
+
+    So the log says what the policy is. A log holding at least one entry this process
+    verified is a log whose writer has the key, and an unsigned entry sitting in it is
+    either a downgrade or a second writer. Both are refusals. A log holding no verified
+    entry at all is read as the legacy it almost certainly is. Nothing has to be configured
+    and there is no flag to set wrongly, which matters because the flag would be set once
+    and then read by nobody.
+
+    That rule has one hole and it is not closeable at this layer. It needs a verified entry
+    to anchor on, so a log with none is read as legacy, and a log somebody else wrote start
+    to finish has none by definition. A store full of genuine legacy logs looks the same.
+    `require_attested` is the answer to that and it is the only setting that defends a model
+    the real pipeline has never promoted.
+
+    TODO: the anchor could come from the registered model rather than from the log, by
+    recording once that this model's history is signed. Not done because that record is
+    itself a tag anything can delete, so it moves the hole rather than closing it. Closing
+    it properly needs a store with conditional writes.
+    """
+    kept: List[Transition] = []
+    rejected: List[Unattributed] = []
+
+    signed_present = any(e.attestation == attest.ATTESTED for e in log)
+
+    for i, entry in enumerate(log):
+        if entry.attestation == attest.FORGED:
+            rejected.append(
+                Unattributed(
+                    position=i,
+                    entry=entry,
+                    reason="the signature on this entry does not match its contents",
+                )
+            )
+        elif entry.attestation == attest.UNATTESTED and (signed_present or require_attested):
+            rejected.append(
+                Unattributed(
+                    position=i,
+                    entry=entry,
+                    reason=(
+                        "this entry carries no signature and the rest of this log is "
+                        "signed"
+                        if signed_present
+                        else "this entry carries no signature and one was required"
+                    ),
+                )
+            )
+        else:
+            kept.append(entry)
+
+    return kept, rejected
+
+
 def promote(
-    cli: mlflow.MlflowClient, name: str, ref: str, stage: str, kind: str = PROMOTE
+    cli: mlflow.MlflowClient,
+    name: str,
+    ref: str,
+    stage: str,
+    kind: str = PROMOTE,
+    key=attest.USE_ENV,
 ) -> Transition:
     """Point a stage at a version and write down that it moved.
 
@@ -409,25 +532,28 @@ def promote(
     )
 
     tags = dict(cli.get_registered_model(name).tags)
-    key = "{}.{}.{:0{}d}".format(HISTORY_PREFIX, stage, _next_seq(tags, stage), SEQ_WIDTH)
-    cli.set_registered_model_tag(name, key, entry.as_value())
+    slot = _slot(stage, _next_seq(tags, stage))
+    value = attest.seal(slot, entry.as_value(), attest.resolve_key(key))
+    cli.set_registered_model_tag(name, slot, value)
 
     # A registered model tag overwrites silently, so the sequence number above is chosen
     # from a read that another writer could have invalidated. There is no compare and set
     # in this API. This reads the key back and refuses if it does not hold what we wrote,
     # which detects a lost update rather than preventing one. Single writer here, so it
     # has never fired. It would fire the moment two pipelines promoted at once.
-    written = dict(cli.get_registered_model(name).tags).get(key)
-    if written != entry.as_value():
+    written = dict(cli.get_registered_model(name).tags).get(slot)
+    if written != value:
         raise RegistryError(
-            "transition log key {} was overwritten between write and read".format(key)
+            "transition log slot {} was overwritten between write and read".format(slot)
         )
 
     cli.set_registered_model_alias(name, stage, str(version))
     return entry
 
 
-def retire(cli: mlflow.MlflowClient, name: str, stage: str) -> Transition:
+def retire(
+    cli: mlflow.MlflowClient, name: str, stage: str, key=attest.USE_ENV
+) -> Transition:
     """Stop a stage pointing at anything, and write down that it stopped.
 
     The mirror of `promote`, and it exists because a canary ends. Same ordering and the
@@ -450,20 +576,23 @@ def retire(cli: mlflow.MlflowClient, name: str, stage: str) -> Transition:
     )
 
     tags = dict(cli.get_registered_model(name).tags)
-    key = "{}.{}.{:0{}d}".format(HISTORY_PREFIX, stage, _next_seq(tags, stage), SEQ_WIDTH)
-    cli.set_registered_model_tag(name, key, entry.as_value())
+    slot = _slot(stage, _next_seq(tags, stage))
+    value = attest.seal(slot, entry.as_value(), attest.resolve_key(key))
+    cli.set_registered_model_tag(name, slot, value)
 
-    written = dict(cli.get_registered_model(name).tags).get(key)
-    if written != entry.as_value():
+    written = dict(cli.get_registered_model(name).tags).get(slot)
+    if written != value:
         raise RegistryError(
-            "transition log key {} was overwritten between write and read".format(key)
+            "transition log slot {} was overwritten between write and read".format(slot)
         )
 
     cli.delete_registered_model_alias(name, stage)
     return entry
 
 
-def rollback_target(cli: mlflow.MlflowClient, name: str, stage: str) -> Optional[int]:
+def rollback_target(
+    cli: mlflow.MlflowClient, name: str, stage: str, key=attest.USE_ENV
+) -> Optional[int]:
     """The most recent version this stage held that has not already been rolled away from.
 
     The obvious rule is "whatever it held immediately before", and that rule is wrong. It
@@ -491,13 +620,19 @@ def rollback_target(cli: mlflow.MlflowClient, name: str, stage: str) -> Optional
     that crashed before moving the alias names a version which never served, and the raw
     log gives no sign of it once a later promote has written a correct entry on top. See
     `settle` for how the two are told apart.
+
+    Two filters run here and the order is load bearing. `authentic` goes first, then
+    `settle`. A forged entry can be shaped to break the witness rule for the genuine entry
+    beside it, and `settle` drops the loser without complaint, so running recovery first
+    discards the evidence that anything was tampered with and then answers confidently
+    from what is left. Measured, with the attack and both orders, in `scripts/drill.py`.
     """
     _check_stage(stage)
     now = current(cli, name, stage)
     if now is None:
         return None
 
-    raw = history(cli, name, stage)
+    raw = history(cli, name, stage, key=key)
     if not raw:
         raise RegistryError(
             "{} on {} is at version {} and the transition log is empty".format(
@@ -505,7 +640,19 @@ def rollback_target(cli: mlflow.MlflowClient, name: str, stage: str) -> Optional
             )
         )
 
-    log, unconfirmed = settle(raw, now)
+    trusted, unattributed = authentic(raw)
+    if unattributed:
+        # Fail closed. An unconfirmed entry is dropped and the walk continues, because a
+        # crash leaves a log that is still the store's own account of itself. This is not
+        # that. Something else has written to the history, so every entry in it is a
+        # question and computing a deploy from the remainder would be answering anyway.
+        first = unattributed[0]
+        raise UnauthenticEntry(
+            "{} of {} transition log entries on {} cannot be attributed. Entry {} {}"
+            .format(len(unattributed), len(raw), name, first.position, first.reason)
+        )
+
+    log, unconfirmed = settle(trusted, now)
 
     if not log:
         raise RegistryError(
@@ -557,10 +704,12 @@ def walk_back(log: List[Transition], now: Optional[int]) -> Optional[int]:
     return None
 
 
-def rollback(cli: mlflow.MlflowClient, name: str, stage: str) -> Transition:
-    target = rollback_target(cli, name, stage)
+def rollback(
+    cli: mlflow.MlflowClient, name: str, stage: str, key=attest.USE_ENV
+) -> Transition:
+    target = rollback_target(cli, name, stage, key=key)
     if target is None:
         raise RegistryError(
             "{} on {} has no previous version to roll back to".format(stage, name)
         )
-    return promote(cli, name, str(target), stage, kind=ROLLBACK)
+    return promote(cli, name, str(target), stage, kind=ROLLBACK, key=key)

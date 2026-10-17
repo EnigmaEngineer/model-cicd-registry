@@ -65,15 +65,18 @@ mcr/artifact.py   deterministic serialisation and a content hash
 mcr/train.py      the pipeline. config in, artefact out, nothing else
 mcr/tracking.py   MLflow. write a run, read it back, rebuild the config from what came back
 mcr/registry.py   which model is in production, which one was there before, and rollback
+mcr/attest.py     a signature over one transition log entry, and the three readings of it
 mcr/gate.py       whether a candidate is allowed to replace the incumbent
 mcr/canary.py     routing a slice of traffic, and the two comparisons that gives you
 mcr/deploy.py     what is deployed. production, the canary on trial, and the share it takes
 ```
 
-Eleven entry points in `scripts/`. Three runners in `tests/`, carrying 215 checks without
-MLflow and 319 with it. The third runner covers the registry and deployment modules only,
-at 15.4 seconds against 28.6 for the full store suite, which is what a mutation pass over
-those two modules needs to fit inside one shell invocation.
+Eleven entry points in `scripts/`. Three runners in `tests/`, carrying 251 checks without
+MLflow and 377 with it. Those two counts are derived by `tests/test_readme.py`, which fails
+with the right answer, because both of them were typed once and then went stale by more
+than thirty. The third runner covers the registry and deployment modules only and comes in
+at under half the full store suite, which is what a mutation pass over those modules needs
+to fit inside one shell invocation.
 
 ## Results
 
@@ -120,6 +123,17 @@ rollback target of 4. The check meant to catch that passed. `registry.settle` no
 log entry nothing in the log or the alias can witness, and the drill reads 3, matching its
 crash free control.
 
+**A forged transition log entry moved the rollback target, and the integrity check has to
+run before the recovery one.** Entries now carry a MAC over the body and the slot they sit
+in. Run recovery first and it drops the forgery as an unwitnessed crash artefact, takes the
+genuine entry beside it, and what is left reads as a healthy log.
+
+```
+ok     forged log entry refused               damaged: refused                        control: 2
+ok     recovery first answers instead of refusing 1 (wanted 1)
+ok     because settle dropped the evidence first 0 rejected after settle (wanted 0 rejected after settle)
+```
+
 **Three static checks passed on a CI workflow that could not run.** For six days there was
 no runner, so the file was read rather than executed. The first real run failed the deploy
 job, because the canary had no incumbent to compare against. The workflow test now hands
@@ -158,8 +172,10 @@ is the logit at which a float64 sigmoid stops being able to return anything belo
 - `--require-gate` is off by default, so the unguarded promotion is still the default path.
 - The gate requirement reads a mutable MLflow tag. It is not a security control.
 - Admission asks whether a model trained, never whether it is any good. `candidate-underfit` passes it and is meant to.
-- `create_version` is the unguarded store primitive and is reachable, so the admission rule can be walked around by calling it.
+- `create_version` is the unguarded store primitive. A check keeps it out of `mcr/`, and checks and probes still reach it deliberately.
 - `promote` cannot survive two writers.
+- The transition log signature authenticates whoever holds one key. There is no rotation and no per pipeline identity.
+- A transition log with no signed entry in it is undefended by default, because the rule refusing an unsigned entry needs a signed one to anchor on. `require_attested` is the only setting that covers it.
 - The nine gate cases were written by the same person who wrote the gate.
 
 The full list is in [docs/limitations.md](docs/limitations.md), with what I would do
@@ -169,24 +185,11 @@ differently.
 
 **[Design notes](docs/design-notes.md)**
 
-- [Tracking, and the question it is built to answer](docs/design-notes.md#tracking-and-the-question-it-is-built-to-answer)
 - [The registry, and the two things MLflow will not do](docs/design-notes.md#the-registry-and-the-two-things-mlflow-will-not-do)
-- [The reference that names two models](docs/design-notes.md#the-reference-that-names-two-models)
 - [Rollback is not "whatever it held before"](docs/design-notes.md#rollback-is-not-whatever-it-held-before)
 - [A crash mid deploy made rollback pick a version that never served](docs/design-notes.md#a-crash-mid-deploy-made-rollback-pick-a-version-that-never-served)
-- [Opening a canary is a change to the registry](docs/design-notes.md#opening-a-canary-is-a-change-to-the-registry)
-- [CI, and what three static checks could not see](docs/design-notes.md#ci-and-what-three-static-checks-could-not-see)
-- [What the rollback changed, and what it did not](docs/design-notes.md#what-the-rollback-changed-and-what-it-did-not)
 - [The gate, and why it does not read the numbers in the store](docs/design-notes.md#the-gate-and-why-it-does-not-read-the-numbers-in-the-store)
-- [Rejecting a model](docs/design-notes.md#rejecting-a-model)
-- [The comparison that is False in both directions](docs/design-notes.md#the-comparison-that-is-false-in-both-directions)
-- [What the gate scores, and what doing nothing scores](docs/design-notes.md#what-the-gate-scores-and-what-doing-nothing-scores)
-- [What the gate can actually see](docs/design-notes.md#what-the-gate-can-actually-see)
-- [The measurement](docs/design-notes.md#the-measurement)
-- [What the first pass found](docs/design-notes.md#what-the-first-pass-found)
-- [Seeds](docs/design-notes.md#seeds)
-- [The canary, and the measurement it cannot make](docs/design-notes.md#the-canary-and-the-measurement-it-cannot-make)
-- [Admission, and the metric that was finite anyway](docs/design-notes.md#admission-and-the-metric-that-was-finite-anyway)
+- [CI, and what three static checks could not see](docs/design-notes.md#ci-and-what-three-static-checks-could-not-see)
 
 **[Running the checks](docs/running-the-checks.md)**
 
@@ -201,3 +204,4 @@ differently.
 - [adr-0007-the-audit-trail-was-biased-toward-wins](docs/adr-0007-the-audit-trail-was-biased-toward-wins.md)
 - [adr-0008-a-published-byte-count-was-measuring-my-filesystem](docs/adr-0008-a-published-byte-count-was-measuring-my-filesystem.md)
 - [adr-0009-admission-is-a-separate-question-from-promotion](docs/adr-0009-admission-is-a-separate-question-from-promotion.md)
+- [adr-0010-recovery-and-authorisation-are-two-questions](docs/adr-0010-recovery-and-authorisation-are-two-questions.md)

@@ -22,10 +22,12 @@ MODULES = [
     "tests.test_artifact",
     "tests.test_train",
     "tests.test_admission",
+    "tests.test_attest",
     "tests.test_gate",
     "tests.test_canary",
     "tests.test_deps",
     "tests.test_workflow",
+    "tests.test_readme",
 ]
 
 

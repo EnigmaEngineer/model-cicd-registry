@@ -26,7 +26,7 @@ happened to give it.
 
 ## Why this one is worth writing down
 
-Every other wrong number this program has caught was a wrong measurement. This was a
+Every other wrong number I have caught here was a wrong measurement. This was a
 correct measurement of the wrong thing. Nobody mistyped it, and re-running the command on
 the machine that produced it would have confirmed it.
 

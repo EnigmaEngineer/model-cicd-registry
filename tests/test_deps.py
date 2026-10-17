@@ -344,3 +344,113 @@ def check_the_oracle_coverage_reader_separates_a_real_import_from_a_mention():
                 fh.write(textwrap.dedent(body))
             got = _binds_and_uses(path, covered)
             assert got is want, "{}: wanted {} and got {}".format(label, want, got)
+
+
+def check_every_check_module_is_in_the_runner_ci_uses():
+    """A check module nobody runs is worth less than no check module at all.
+
+    tests/test_attest.py shipped into this repo listed in the narrow development runner and
+    in neither of the two that matter, so twenty six checks passed on demand and would
+    never have run again. The narrow runner is a measurement tool. The full one is what CI
+    reads, so that is the list this compares against.
+
+    Derived from the directory rather than from a second list, because a list compared
+    against a list of the same provenance agrees with itself.
+    """
+    sys.path.insert(0, ROOT)
+    from tests.run_all import MODULES as BASE
+    from tests.run_with_mlflow import EXTRA
+
+    on_disk = {
+        "tests." + entry[: -len(".py")]
+        for entry in sorted(os.listdir(os.path.join(ROOT, "tests")))
+        if entry.startswith("test_") and entry.endswith(".py")
+    }
+    assert on_disk, "no check modules found, so this check is reading nothing"
+
+    missing = sorted(on_disk - set(BASE) - set(EXTRA))
+    assert not missing, (
+        "these check modules exist and no runner CI uses lists them, so they never "
+        "run: {}".format(missing)
+    )
+
+
+def _calls_create_version(path):
+    """Every call to registry.create_version in one file, as line numbers.
+
+    This reads the whole tree rather than `tree.body`. The import walk above deliberately
+    reads only `tree.body`, because an import behind a branch does not run at import time
+    and the question there is what executes on import. A call site is a different question
+    and a call nested inside a function is exactly the one worth finding, so the two
+    readers disagree on purpose.
+    """
+    import ast
+
+    with open(path, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), filename=path)
+
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Attribute) and fn.attr == "create_version":
+            hits.append(node.lineno)
+        elif isinstance(fn, ast.Name) and fn.id == "create_version":
+            hits.append(node.lineno)
+    return hits
+
+
+def check_nothing_in_the_library_walks_round_the_admission_door():
+    """`register` checks an artefact. `create_version` does not. Only one is the door.
+
+    Fifteen of sixteen call sites moved to the unguarded twin when the signature changed,
+    which left the guard on one production path and nothing enforcing the split. A comment
+    recorded the decision and a comment is not a check.
+
+    The rule is about library code. Inside `mcr/` only the registry itself may reach the
+    primitive. Checks, probes and the drill all build stores full of fabricated hashes and
+    none of them is claiming those bytes are a trained model, which is the case the
+    primitive exists for, so they are not restricted here.
+
+    Scoping it to `mcr/` rather than to a list of exempt filenames is deliberate. An
+    exemption list grades what its author remembered on the day, and this repo has found
+    that failure in several places already.
+    """
+    offenders = {}
+    for path in _source_files():
+        rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
+        if not rel.startswith("mcr/") or rel == "mcr/registry.py":
+            continue
+        hits = _calls_create_version(path)
+        if hits:
+            offenders[rel] = hits
+
+    assert not offenders, (
+        "these library modules call registry.create_version, which skips the admission "
+        "rule that register applies: {}".format(offenders)
+    )
+
+
+def check_the_call_site_reader_finds_a_call_it_should_and_ignores_a_mention():
+    """A control, because a reader that finds nothing would pass the check above forever.
+
+    Four cases with a known answer. The nested call is the one `tree.body` cannot see, and
+    the docstring mention is what a grep got wrong on this repo before.
+    """
+    import tempfile
+    import textwrap
+
+    cases = (
+        ("registry.create_version(cli)", 1),
+        ("def f():\n    return registry.create_version(cli)\n", 1),
+        ('"""a docstring naming registry.create_version"""\n', 0),
+        ("x = create_version\n", 0),
+    )
+    folder = tempfile.mkdtemp(prefix="callsite-")
+    for i, (body, want) in enumerate(cases):
+        path = os.path.join(folder, "case{}.py".format(i))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(textwrap.dedent(body))
+        got = len(_calls_create_version(path))
+        assert got == want, (body, got, want)

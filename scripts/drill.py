@@ -20,6 +20,7 @@ drill two deployed a version that had never served a single request.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -30,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mlflow  # noqa: E402
 
-from mcr import deploy, registry  # noqa: E402
+from mcr import attest, deploy, registry  # noqa: E402
 
 MODEL = "drill-model"
 
@@ -116,10 +117,13 @@ def half_promote(cli: mlflow.MlflowClient, to: int, frm: Optional[int], stage: s
     """
     tags = dict(cli.get_registered_model(MODEL).tags)
     entry = registry.Transition(stage=stage, to_version=to, from_version=frm, at_ms=1)
-    key = "{}.{}.{:0{}d}".format(
-        registry.HISTORY_PREFIX, stage, registry._next_seq(tags, stage), registry.SEQ_WIDTH
+    key = registry._slot(stage, registry._next_seq(tags, stage))
+    # Sealed, because promote seals before it writes the tag. A crash lands after that, so
+    # an unsealed phantom would be modelling a different event and would be refused as
+    # tampering rather than recovered as a crash.
+    cli.set_registered_model_tag(
+        MODEL, key, attest.seal(key, entry.as_value(), attest.key_from_env())
     )
-    cli.set_registered_model_tag(MODEL, key, entry.as_value())
 
 
 def target_or_refusal(cli: mlflow.MlflowClient, stage: str = "production") -> str:
@@ -256,6 +260,163 @@ def drill_rollback_does_not_oscillate(d: Drills, tmp: str) -> None:
     d.refusal("two rollbacks reach the oldest", damaged, control, "3")
 
 
+def _forge(cli: mlflow.MlflowClient, seq: int, value: str) -> None:
+    """Overwrite one history slot with something this process did not write.
+
+    A registered model tag write is unconditional, so this is the whole attack. It needs no
+    privilege the deploy pipeline does not already have.
+    """
+    cli.set_registered_model_tag(MODEL, registry._slot("production", seq), value)
+
+
+def _signed_three(tmp: str, slot: str) -> mlflow.MlflowClient:
+    cli = fresh(tmp, slot)
+    for v in ("1", "2", "3"):
+        registry.promote(cli, MODEL, v, "production")
+    return cli
+
+
+def _wrong_order(cli: mlflow.MlflowClient) -> Tuple[str, int]:
+    """Recovery first, then the integrity check. The order this code does not use.
+
+    Both halves are the shipped functions rather than a second copy of them, so the only
+    difference between this and `rollback_target` is which one runs first.
+    """
+    raw = registry.history(cli, MODEL, "production")
+    now = registry.current(cli, MODEL, "production")
+    kept, _ = registry.settle(raw, now)
+    trusted, rejected = registry.authentic(kept)
+    return str(registry.walk_back(trusted, now)), len(rejected)
+
+
+def drill_forged_entry_evicts_a_genuine_one(d: Drills, tmp: str) -> None:
+    """A tampered entry, and the reason the two filters run in the order they do.
+
+    The forged entry claims a move to a version that was never promoted. That breaks the
+    witness rule for the genuine entry beside it, so a recovery pass drops the genuine one
+    and keeps a log that reads as healthy. The rollback target moves and nothing refuses.
+
+    The third row is the one worth having. By the time a recovery first pass gets round to
+    asking who wrote the log, the forged entry has already been discarded as a crash
+    artefact, so the integrity check has nothing left to object to.
+    """
+    os.environ[attest.ENV_KEY] = "drill-key"
+    try:
+        cli = _signed_three(tmp, "f1a")
+        phantom = registry.Transition(
+            stage="production", to_version=9, from_version=1, at_ms=1
+        )
+        _forge(cli, 1, json.dumps(
+            {"body": phantom.as_value(), "mac": "00" * 32},
+            sort_keys=True, separators=(",", ":"),
+        ))
+        damaged = target_or_refusal(cli)
+        wrong_order, rejected_late = _wrong_order(cli)
+
+        control = target_or_refusal(_signed_three(tmp, "f1b"))
+
+        d.refusal("forged log entry refused", damaged, control, "2")
+        d.invariant("recovery first answers instead of refusing", wrong_order, "1")
+        d.invariant(
+            "because settle dropped the evidence first",
+            "{} rejected after settle".format(rejected_late),
+            "0 rejected after settle",
+        )
+    finally:
+        os.environ.pop(attest.ENV_KEY, None)
+
+
+def drill_unsigned_entry_in_a_signed_log(d: Drills, tmp: str) -> None:
+    """The cheapest forgery there is, which is to leave the signature off.
+
+    This is the one that decided the policy. An unsigned entry was accepted by the first
+    rule written here, which made the signature worth nothing against anybody who could
+    write a tag, because leaving it off was easier than faking it.
+    """
+    os.environ[attest.ENV_KEY] = "drill-key"
+    try:
+        cli = _signed_three(tmp, "f2a")
+        phantom = registry.Transition(
+            stage="production", to_version=9, from_version=1, at_ms=1
+        )
+        _forge(cli, 1, phantom.as_value())
+        damaged = target_or_refusal(cli)
+        wrong_order, _ = _wrong_order(cli)
+        control = target_or_refusal(_signed_three(tmp, "f2b"))
+
+        d.refusal("unsigned entry in a signed log refused", damaged, control, "2")
+        d.invariant("and the wrong order still answers", wrong_order, "1")
+    finally:
+        os.environ.pop(attest.ENV_KEY, None)
+
+
+def drill_genuine_entry_moved_to_another_slot(d: Drills, tmp: str) -> None:
+    """Replay. The entry is real and this process wrote it, into a different slot.
+
+    The log is ordered by that slot, so moving an entry changes which version the walk
+    reaches. The slot is signed material for this reason and nothing else.
+    """
+    os.environ[attest.ENV_KEY] = "drill-key"
+    try:
+        cli = _signed_three(tmp, "f3a")
+        tags = dict(cli.get_registered_model(MODEL).tags)
+        _forge(cli, 3, tags[registry._slot("production", 2)])
+        damaged = target_or_refusal(cli)
+        control = target_or_refusal(_signed_three(tmp, "f3b"))
+        d.refusal("replayed entry refused", damaged, control, "2")
+    finally:
+        os.environ.pop(attest.ENV_KEY, None)
+
+
+def drill_an_unsigned_log_still_reads(d: Drills, tmp: str) -> None:
+    """The control on the policy. A history written before any of this still answers.
+
+    Without this row the three above would pass under a rule that refused every log, which
+    would be the gate passing on nothing that this repo has now found in seven places.
+    """
+    cli = _signed_three(tmp, "f4a")
+    states = {e.attestation for e in registry.history(cli, MODEL, "production")}
+    d.invariant("an unsigned log answers normally", target_or_refusal(cli), "2")
+    d.invariant(
+        "and it really was unsigned",
+        ",".join(sorted(states)),
+        attest.UNATTESTED,
+    )
+
+
+def drill_a_wholly_unsigned_log_is_undefended(d: Drills, tmp: str) -> None:
+    """The hole in the default policy, measured rather than described.
+
+    The no downgrade rule needs an entry it verified before it can call an unsigned one a
+    downgrade. A model the pipeline has never promoted offers no such entry, so a log
+    written end to end by somebody else is read as a legacy log and answered normally.
+
+    Both rows below are the weakness rather than the defence. The first is what the default
+    does and the second is the setting that refuses it.
+    """
+    os.environ[attest.ENV_KEY] = "drill-key"
+    try:
+        cli = fresh(tmp, "f5a")
+        for seq, (to, frm) in enumerate(((1, None), (2, 1), (3, 2))):
+            entry = registry.Transition(
+                stage="production", to_version=to, from_version=frm, at_ms=1
+            )
+            _forge(cli, seq, entry.as_value())
+        cli.set_registered_model_alias(MODEL, "production", "3")
+
+        raw = registry.history(cli, MODEL, "production")
+        d.invariant("a log nobody signed answers anyway", target_or_refusal(cli), "2")
+        d.invariant(
+            "and only require_attested refuses it",
+            "{} of {} rejected".format(
+                len(registry.authentic(raw, require_attested=True)[1]), len(raw)
+            ),
+            "3 of 3 rejected",
+        )
+    finally:
+        os.environ.pop(attest.ENV_KEY, None)
+
+
 def drill_canary_open_crashed(d: Drills, tmp: str) -> None:
     """Crash between the fraction write and the canary alias. Abort is the repair."""
     cli = fresh(tmp, "c6a")
@@ -330,6 +491,12 @@ def main() -> int:
         drill_crash_after_alias_moved(d, tmp)
         drill_out_of_band_alias(d, tmp)
         drill_rollback_does_not_oscillate(d, tmp)
+        print("")
+        drill_forged_entry_evicts_a_genuine_one(d, tmp)
+        drill_unsigned_entry_in_a_signed_log(d, tmp)
+        drill_genuine_entry_moved_to_another_slot(d, tmp)
+        drill_an_unsigned_log_still_reads(d, tmp)
+        drill_a_wholly_unsigned_log_is_undefended(d, tmp)
         print("")
         drill_canary_open_crashed(d, tmp)
         drill_canary_land_crashed(d, tmp)

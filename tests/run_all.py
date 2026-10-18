@@ -27,6 +27,7 @@ MODULES = [
     "tests.test_canary",
     "tests.test_deps",
     "tests.test_workflow",
+    "tests.test_ci_local",
     "tests.test_readme",
 ]
 

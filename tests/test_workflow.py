@@ -1,9 +1,13 @@
 """Does the CI workflow name things this repo actually has.
 
-The workflow has never run. There is no GitHub runner here, so the file is a description of
-intended wiring and the usual evidence for one of these is that it went green somewhere.
-That evidence is not available, which leaves two choices. Ship it unchecked and let it rot,
-or check the part that does not need a runner.
+There is still no GitHub runner here. What changed is that the file gets executed anyway,
+by `scripts/ci_local.py`, which runs a job in local shells with the step outputs captured.
+That covers the sequence. It does not cover the runner image or the python version, so the
+checks below are still worth having and the division of labour is now deliberate rather
+than forced.
+
+What belongs here is whatever is cheap and reads the file. What belongs in an execution is
+whatever depends on the state one command leaves for the next.
 
 Three things rot without a runner and all three are readable from here. A step can name a
 script that was renamed or never written. A step can pass arguments the script's parser
@@ -24,67 +28,31 @@ and raises on anything it does not understand, which is the important half.
 from __future__ import annotations
 
 import ast
-import importlib.util
 import os
 import re
 import shlex
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WORKFLOW = os.path.join(ROOT, ".github", "workflows", "ci.yml")
+from tests.loader import ROOT, load_script
+
+# One reader for this file. The checks below used to scrape `run:` lines with a second pass
+# that knew nothing about jobs or steps, which is how a comment between two steps ended up
+# inside the block above it. `scripts/ci_local.py` has to parse the structure anyway in
+# order to execute a job, so the structure is what everything reads now.
+ci = load_script("ci_local")
+
+WORKFLOW = ci.WORKFLOW
 
 
 def _text():
-    with open(WORKFLOW, "r", encoding="utf-8") as fh:
-        return fh.read()
+    return ci.workflow_text()
 
 
 def _join_continuations(lines):
-    """Fold `\\` continuations into one command.
-
-    Written after the exit code check below fired on a line that was the tail of a wrapped
-    `python3` call. The check was right about the rule and wrong about what a line is.
-    """
-    out = []
-    pending = ""
-    for line in lines:
-        if line.endswith("\\"):
-            pending += line[:-1].rstrip() + " "
-            continue
-        out.append((pending + line).strip())
-        pending = ""
-    if pending:
-        out.append(pending.strip())
-    return out
+    return ci.join_continuations(lines)
 
 
 def _run_commands(text):
-    """Every shell command under a `run:` key, block scalars included."""
-    lines = text.splitlines()
-    out = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        if stripped.startswith("run:"):
-            rest = stripped[len("run:"):].strip()
-            if rest and rest != "|":
-                out.append(rest)
-                i += 1
-                continue
-            indent = len(line) - len(line.lstrip())
-            body = []
-            i += 1
-            while i < len(lines):
-                nxt = lines[i]
-                if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
-                    break
-                if nxt.strip():
-                    body.append(nxt.strip())
-                i += 1
-            out.extend(_join_continuations(body))
-            continue
-        i += 1
-    return out
+    return ci.run_commands(text)
 
 
 def check_the_workflow_file_is_there():
@@ -174,12 +142,7 @@ def check_every_command_the_workflow_runs_actually_parses():
 
         name = os.path.basename(script)[: -len(".py")]
         if name not in parsers:
-            spec = importlib.util.spec_from_file_location(
-                "wf_" + name, os.path.join(ROOT, script)
-            )
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            parsers[name] = getattr(module, "build_parser", None)
+            parsers[name] = getattr(load_script(name), "build_parser", None)
 
         # The first version of this check skipped a script with no build_parser, and three
         # of them built their parser inside main. So the workflow's very first deploy step
@@ -292,32 +255,91 @@ def check_the_drills_run_in_ci():
 
 
 def check_the_reader_refuses_a_shape_it_does_not_understand():
-    """The parser above is hand written, so it needs a case where it must not stay quiet.
+    """The reader is hand written, so it needs a case where it must not stay quiet.
 
     A reader that returns an empty list on an unfamiliar file makes every check above pass
-    having read nothing, which is the shape this repo keeps finding. So the commands list is
-    asserted non empty against the real file rather than only against a fixture.
+    having read nothing. The shapes it refuses are graded in tests/test_ci_local.py, next
+    to the reader itself. What is asserted here is the half that matters to these checks,
+    which is that the real file is being read rather than skipped.
     """
     commands = _run_commands(_text())
     assert len(commands) >= 10, "only found {} run commands, the reader is not reading the "\
         "file".format(len(commands))
 
-    sample = "\n".join([
-        "    steps:",
-        "      - name: one",
-        "        run: python3 scripts/drill.py",
-        "      - name: two",
-        "        run: |",
-        "          echo hello",
-        "          python3 tests/run_all.py",
-        "      - name: three",
-        "        uses: actions/checkout@v4",
-    ])
-    assert _run_commands(sample) == [
-        "python3 scripts/drill.py",
-        "echo hello",
-        "python3 tests/run_all.py",
-    ], _run_commands(sample)
+    try:
+        ci.read_workflow("steps:\n  - name: no job around this\n")
+    except ci.WorkflowError:
+        pass
+    else:
+        raise AssertionError("the reader accepted a fragment with no jobs in it")
+
+
+def check_a_canary_step_runs_only_when_a_canary_was_opened():
+    """Found by running the deploy job rather than by reading it.
+
+    `read the canary` carried no condition, so a rejected candidate reached it. The gate
+    exits 1, `open the canary` is correctly skipped, and the canary read then runs against
+    a store where nothing is aliased `canary`. Measured: canary.py refuses with exit 2 and
+    the block's `exit 0` reported the step green.
+
+    Every static check passed on that version. The names were right, the flags parsed, and
+    both branch codes were reachable. What none of them read was that one step had a guard
+    and the next one needed the same guard.
+    """
+    doc = ci.read_workflow(_text())
+    steps = doc["jobs"]["deploy"]["steps"]
+
+    opener = None
+    for step in steps:
+        if "run" in step and "deploy.py open" in step["run"]:
+            opener = step
+            break
+    assert opener is not None, "nothing in the deploy job opens a canary"
+    guard = opener.get("if")
+    assert guard, "`deploy.py open` has no condition, so it runs on a rejected candidate"
+
+    reached = False
+    ungated = []
+    for step in steps:
+        if step is opener:
+            reached = True
+            continue
+        if not reached or "run" not in step:
+            continue
+        if "canary" not in step["run"]:
+            continue
+        own = step.get("if")
+        if own in (guard, "always()"):
+            continue
+        ungated.append((step.get("name"), own))
+    assert not ungated, (
+        "these steps touch the canary after it is opened and are not gated on {!r}: "
+        "{}".format(guard, ungated)
+    )
+
+
+def check_neither_capture_step_calls_a_refusal_a_verdict():
+    """A refusal means the script could not answer, which is a broken build.
+
+    The gate step branched on its refusal code from the start. The canary step did not, so
+    exit 2 was written into the output as though it were a verdict and then matched none of
+    the branches reading it. The job went green having decided nothing.
+
+    The code is read out of each script rather than typed here, so moving a constant fails
+    this check instead of silently making it meaningless.
+    """
+    text = _text()
+    for step_id, script in (("gate", "gate.py"), ("canary", "canary.py")):
+        refuse = _exit_constants(script).get("EXIT_REFUSE")
+        assert refuse is not None, "scripts/{} has no EXIT_REFUSE".format(script)
+
+        block = text[text.index("id: {}".format(step_id)):]
+        block = block[: block.index("$GITHUB_OUTPUT")] + block[block.index("$GITHUB_OUTPUT"):]
+        block = block[: block.index("- name:", block.index("$GITHUB_OUTPUT"))]
+        assert 'if [ "$code" = "{}" ]'.format(refuse) in block, (
+            "the {} step writes exit {} into its output and never branches on it, so a "
+            "refusal reaches the next step as a verdict".format(step_id, refuse)
+        )
 
 
 def check_every_adr_is_reachable_from_the_readme():

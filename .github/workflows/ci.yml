@@ -141,8 +141,20 @@ jobs:
       # Exit 0 lands the canary. 1 aborts it and leaves production alone. 3 holds, which
       # means the split could not separate the two models and is the common answer on a
       # small slice. Hold leaves the canary running for a human to look at.
+      #
+      # Both lines below were added after running this job locally for the first time. The
+      # step had no `if`, so a rejected candidate still reached it. Measured: the gate exits
+      # 1, the canary step runs against a store where nothing is aliased `canary`, and
+      # canary.py refuses with exit 2. The `exit 0` then swallowed that refusal and the step
+      # reported green. A build could reject a candidate and still claim it had read a
+      # canary. Reading a canary only makes sense when one was opened.
+      #
+      # The refusal branch mirrors the gate for the same reason the gate has one. A refusal
+      # is not a verdict. Without it, exit 2 arrives at `land it` and `take it off traffic`
+      # as a code neither of them matches, so the job goes green having decided nothing.
       - name: read the canary
         id: canary
+        if: steps.gate.outputs.verdict == '0'
         run: |
           set +e
           python3 scripts/canary.py --store "$MCR_STORE" --model "$MCR_MODEL" \
@@ -150,6 +162,10 @@ jobs:
           code=$?
           set -e
           echo "verdict=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "2" ]; then
+            echo "the canary could not be read, which is not a verdict"
+            exit 1
+          fi
           exit 0
 
       - name: land it

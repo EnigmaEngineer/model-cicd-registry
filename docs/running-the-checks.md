@@ -92,20 +92,28 @@ python3 scripts/drill.py
 ```
 ok     crash then retry same version, answer  3 (wanted 3)
 ok     raw log agrees here, so no damage      3 (wanted 3)
-ok     and settle still dropped the phantom   5 raw, 4 kept, 1 dropped
-ok     crash then ship a different version    raw log: 4  settled: 3  control: 3
-ok     crash after the alias moved            damaged: refused    control: 2
-ok     alias moved outside promote            damaged: refused    control: 2
-ok     two rollbacks reach the oldest         damaged: 1          control: 3
-
+ok     and settle still dropped the phantom   5 raw, 4 kept, 1 dropped (wanted 5 raw, 4 kept, 1 dropped)
+ok     crash then ship a different version    raw log: 4        settled: 3        control: 3
+ok     crash after the alias moved            damaged: refused                        control: 2
+ok     alias moved outside promote            damaged: refused                        control: 2
+ok     two rollbacks reach the oldest         damaged: 1                              control: 3
+ok     forged log entry refused               damaged: refused                        control: 2
+ok     recovery first answers instead of refusing 1 (wanted 1)
+ok     because settle dropped the evidence first 0 rejected after settle (wanted 0 rejected after settle)
+ok     unsigned entry in a signed log refused damaged: refused                        control: 2
+ok     and the wrong order still answers      1 (wanted 1)
+ok     replayed entry refused                 damaged: refused                        control: 2
+ok     an unsigned log answers normally       2 (wanted 2)
+ok     and it really was unsigned             unattested (wanted unattested)
+ok     a log nobody signed answers anyway     2 (wanted 2)
+ok     and only require_attested refuses it   3 of 3 rejected (wanted 3 of 3 rejected)
 ok     canary open crashed, then repaired     consistent (wanted consistent)
 ok     and it was really broken first         broken (wanted broken)
 ok     canary land crashed, then repaired     consistent (wanted consistent)
 ok     and it was really broken first         broken (wanted broken)
 ok     that repair left production alone      3 (wanted 3)
-ok     aborting a canary leaves production    damaged: 1          control: 2
-
-13 drills, 0 bad
+ok     aborting a canary leaves production    damaged: 1                              control: 2
+23 drills, 0 bad
 ```
 
 `gate_probe.py` and `canary_probe.py` need no MLflow at all.

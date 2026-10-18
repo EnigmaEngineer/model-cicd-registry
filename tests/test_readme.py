@@ -89,3 +89,74 @@ def check_every_module_the_readme_counts_is_a_real_file():
     for module in list(BASE) + list(EXTRA):
         path = os.path.join(ROOT, module.replace(".", os.sep) + ".py")
         assert os.path.isfile(path), path
+
+
+def _drill_row_sites():
+    """Every call site in scripts/drill.py that appends one drill row.
+
+    The three `Drills` methods that append are `refusal`, `recovery` and `invariant`. Each
+    call site is one row, which is only true while none of them sits inside a loop, so the
+    loop case is checked rather than assumed.
+    """
+    import ast
+
+    path = os.path.join(ROOT, "scripts", "drill.py")
+    with open(path, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), filename=path)
+
+    appending = {"refusal", "recovery", "invariant"}
+
+    def appends(node):
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr in appending
+            and isinstance(func.value, ast.Name)
+        )
+
+    sites = [(n.func.attr, n.lineno) for n in ast.walk(tree) if appends(n)]
+
+    looped = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.For, ast.While, ast.AsyncFor)):
+            continue
+        looped.extend((n.func.attr, n.lineno) for n in ast.walk(node) if appends(n))
+
+    return sorted(set(sites)), sorted(set(looped))
+
+
+def check_the_published_drill_count_is_derived_from_the_drill_script():
+    """The count went stale in two documents at once and nothing noticed.
+
+    The drills grew from 13 to 23 while the README said thirteen and
+    `docs/running-the-checks.md` published a block ending `13 drills, 0 bad`. Both numbers
+    were typed. A number a document states about the repo it sits in is worth a check that
+    fails with the right answer in its message.
+    """
+    sites, looped = _drill_row_sites()
+    assert not looped, (
+        "these drill rows are appended inside a loop, so the count is no longer derivable "
+        "from the call sites and this check has to change: {}".format(looped)
+    )
+    expected = len(sites)
+    assert expected > 10, "only found {} drill call sites, which cannot be right".format(
+        expected
+    )
+
+    wrong = []
+    for name in ("README.md", os.path.join("docs", "running-the-checks.md")):
+        with open(os.path.join(ROOT, name), "r", encoding="utf-8") as fh:
+            text = fh.read()
+        for found in re.findall(r"(\d+) drills, \d+ bad", text):
+            if int(found) != expected:
+                wrong.append((name, found + " drills, N bad"))
+        for word, value in (("Thirteen", 13), ("Twenty three", 23), ("Twenty", 20)):
+            if word + " drills" in text and value != expected:
+                wrong.append((name, word + " drills"))
+    assert not wrong, (
+        "scripts/drill.py appends {} rows and these say otherwise: {}".format(
+            expected, wrong
+        )
+    )

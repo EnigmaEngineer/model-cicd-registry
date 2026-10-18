@@ -50,7 +50,7 @@ The failure drills are the evidence for the rollback path and they run in second
 python3 scripts/drill.py
 ```
 
-Thirteen drills over states a crash really produces, each with a control that has to come
+Twenty three drills over states a crash really produces, each with a control that has to come
 back healthy. Tracking and the registry have their own commands, and so do the gate and
 the canary. All of them are in [docs/running-the-checks.md](docs/running-the-checks.md).
 
@@ -71,8 +71,8 @@ mcr/canary.py     routing a slice of traffic, and the two comparisons that gives
 mcr/deploy.py     what is deployed. production, the canary on trial, and the share it takes
 ```
 
-Eleven entry points in `scripts/`. Three runners in `tests/`, carrying 251 checks without
-MLflow and 377 with it. Those two counts are derived by `tests/test_readme.py`, which fails
+Twelve entry points in `scripts/`. Three runners in `tests/`, carrying 267 checks without
+MLflow and 393 with it. Those two counts are derived by `tests/test_readme.py`, which fails
 with the right answer, because both of them were typed once and then went stale by more
 than thirty. The third runner covers the registry and deployment modules only and comes in
 at under half the full store suite, which is what a mutation pass over those modules needs
@@ -83,11 +83,11 @@ to fit inside one shell invocation.
 **Same config, same bytes, across fresh processes.**
 
 ```
-same config, one process           OK    3 runs, 1 distinct hash
-same config, fresh processes       OK    3 runs, 1 distinct hash, equal to the above
-control: seed + 1 differs          OK
-control: epochs + 1 differs        OK
-control: init changes the fit      OK
+same config, one process           OK       3 runs, 1 distinct, 8b83b8d77ac9
+same config, fresh processes       OK       3 runs, 1 distinct, 8b83b8d77ac9
+control: seed + 1 differs          OK       2455cc6f00a6
+control: epochs + 1 differs        OK       1b33f9807369
+control: init changes the fit      OK       zeros 8b83b8d7 normal 5dae2066
 ```
 
 **The promotion gate gets nine of nine cases right, and doing nothing gets four.** Nine
@@ -134,27 +134,29 @@ ok     recovery first answers instead of refusing 1 (wanted 1)
 ok     because settle dropped the evidence first 0 rejected after settle (wanted 0 rejected after settle)
 ```
 
-**Three static checks passed on a CI workflow that could not run.** For six days there was
-no runner, so the file was read rather than executed. The first real run failed the deploy
-job, because the canary had no incumbent to compare against. The workflow test now hands
-every script call in the file to that script's own argument parser.
+**A CI workflow can go green having decided nothing.** The file is executed here now
+rather than only read. `scripts/ci_local.py` runs a job the way a runner does, with each
+block in its own shell and every `if` evaluated against a real `$GITHUB_OUTPUT`. Driving
+the gate to a reject found a step that ran on a rejected candidate and swallowed the
+refusal. Ten static checks passed on it. `docs/adr-0011`.
 
 **The registry refuses an artefact that never trained, and one of the two refusals was not
 enough on its own.** `register` takes the artefact rather than its hash and applies an
 admission rule before the store is touched. Measured end to end against a sqlite store.
 
-```
-config                 logit scale    admitted   why not
-baseline               2.23082        yes        -
-candidate-close        1.69692        yes        -
-candidate-lr           2.23082        yes        -
-candidate-underfit     0.20277        yes        -
-candidate-inverted     6.038e+238     no         non finite parameter, saturated
-candidate-diverged     nan            no         non finite metric, non finite parameter
+No command prints the next table. Each row is `mcr.admission.inspect` over the artefact that
+config trains, and the last column is the verdict's `reasons` tuple rather than its message.
 
-  three configs through scripts/train.py --register:
-  1 registered version, 2 refused with exit 1, 5 tracking runs logged
-```
+| config | logit scale | admitted | reasons |
+|---|---|---|---|
+| baseline | 2.23082 | yes | |
+| candidate-close | 1.69692 | yes | |
+| candidate-lr | 2.23082 | yes | |
+| candidate-underfit | 0.20277 | yes | |
+| candidate-inverted | 6.03803e+238 | no | `non_finite_parameter` `saturated_parameters` |
+| candidate-diverged | nan | no | `non_finite_metric` `non_finite_parameter` |
+
+Saturation starts at logit 36.7368005696771, where a float64 sigmoid returns exactly 0 or 1.
 
 `candidate-inverted` is the case worth the attention. At `l2` 10 it diverges with every
 metric finite. Holdout log loss is 19.70 and AUC is 0.377109, both real numbers, against a

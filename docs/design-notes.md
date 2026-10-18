@@ -233,6 +233,9 @@ constants, because those are what an author gets wrong from memory. A sequence o
 individually correct commands that cannot happen in order is a different kind of wrong, and
 it took a real runner to find it.
 
+The second one did not need a runner. Executing the job locally found a step with no
+condition on it that ran whenever the gate rejected a candidate. `adr-0011`.
+
 ## What the rollback changed, and what it did not
 
 Two models are registered. Rolling production from version 2 back to version 1 swaps one

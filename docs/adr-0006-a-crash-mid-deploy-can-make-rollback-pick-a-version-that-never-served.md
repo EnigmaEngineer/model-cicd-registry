@@ -154,6 +154,11 @@ a canary. There is no runner in the environment this was built in, so `.github/w
 intended wiring and it has never gone green anywhere. Saying otherwise would be the
 fabrication this repo spends most of its checks preventing.
 
+CORRECTED 2026-10-18. The paragraph above still describes the environment and no longer
+describes the practice. `scripts/ci_local.py` executes a job here. The reasoning below is
+why the static checks exist and it is not an argument that they are all there is. See
+`adr-0011`.
+
 What can be checked without a runner is narrower and `tests/test_workflow.py` does it. Three
 things rot in a workflow and all three are readable from the file. A step can name a script
 that was renamed. A step can pass arguments the script refuses. A step can branch on an exit
@@ -206,6 +211,11 @@ way to test a rollback is under load, and load is not a thing that can be measur
 What was drilled is the state machine, which is the half that exists.
 
 **The workflow has still never executed.** Everything above is a check on the file.
+
+CORRECTED 2026-10-18. It is executed now, locally, by `scripts/ci_local.py`. All three jobs
+run green and the deploy job's reject path turned out to reach a step that should not have
+run at all. Still not a runner, so the sentence above is right about a badge and wrong about
+everything else. See `adr-0011`.
 
 **`_next_seq` survives a mutation.** Moving `max(used) + 1` to `+ 2` leaves gaps in the
 sequence and changes no outcome, because the keys are zero padded to a fixed width and only

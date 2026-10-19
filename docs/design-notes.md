@@ -552,7 +552,38 @@ mcr/seed.py        7 of 7
 mcr/model.py      81 of 89
 mcr/artifact.py    6 of 7
 mcr/data.py       18 of 26
+mcr/canary.py    122 of 125            oracle is the canary checks alone
+mcr/roundtrip.py   9 of 9
 ```
+
+Two of those are new and the reason is the same for both. The comparisons the two probes
+decide on used to be expressions inside the scripts, and nothing in `tests/` imports a
+script, so every one of them was outside the reach of a pass. Five of those rules now live
+in `mcr/canary.py`:
+
+- the bound on how far a router's achieved share may sit from its target
+- the ratio between a split interval and the paired one
+- the answer key rule, which is the paired verdict on a per row difference
+- the scoring of a strategy against that key
+- the floor a strategy that ignores the data reaches
+
+The round trip facts the tracking probe reads live in `mcr/roundtrip.py`. The probes drive
+and print.
+
+`mcr/canary.py` scored 94 of 97 before the move and 122 of 125 after it. Both passes were
+run with the same runner over the published commit and then the working tree, because a
+score taken only on an edited tree cannot say whether a survivor is new. The three
+survivors are the same three sites in both, so none of the twenty eight new sites survives.
+Two of the three are field widths in a printed table and the third moves `ddof` from one to
+two in the spread that sizes a split comparison. That one is worth a check and has not got
+one yet.
+
+`scripts/ci_local.py` was graded for the first time, and the half that runs the commands
+scored **0 of 33**. Not a weak oracle. A trace of which functions the checks reach found
+three of eighteen never called at all, and `execute`, `build_parser` and `main` were the
+three. A mutant cannot be killed in code nothing executes. Driving the executor against a
+small workflow of `echo` commands took that region to 25 of 34. Seven of the nine still
+standing are in `main` past the plan branch, and reaching them means running the real job.
 
 The gate pass is the one that changed the code rather than the tests. It went 24 of 40
 first, and the sixteen survivors were classified one at a time by unparsing each mutant and

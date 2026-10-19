@@ -71,8 +71,8 @@ mcr/canary.py     routing a slice of traffic, and the two comparisons that gives
 mcr/deploy.py     what is deployed. production, the canary on trial, and the share it takes
 ```
 
-Twelve entry points in `scripts/`. Three runners in `tests/`, carrying 267 checks without
-MLflow and 393 with it. Those two counts are derived by `tests/test_readme.py`, which fails
+Twelve entry points in `scripts/`. Three runners in `tests/`, carrying 307 checks without
+MLflow and 433 with it. Those two counts are derived by `tests/test_readme.py`, which fails
 with the right answer, because both of them were typed once and then went stale by more
 than thirty. The third runner covers the registry and deployment modules only and comes in
 at under half the full store suite, which is what a mutation pass over those modules needs

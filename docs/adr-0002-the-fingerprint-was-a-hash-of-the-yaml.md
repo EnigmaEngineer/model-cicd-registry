@@ -82,7 +82,8 @@ that silently moved every published key would have been worse than the defect.
 
 ## Params against tags, decided by measurement rather than by convention
 
-The same build needed to know where the recipe lives in MLflow. Measured on mlflow 3.16.0.
+The same build needed to know where the recipe lives in MLflow. Every row below was
+measured on mlflow 3.16.0 and re-measured unchanged on 3.17.1.
 
 ```
 log_param on a key holding a different value    raises MlflowException

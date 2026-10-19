@@ -140,13 +140,20 @@ float rule was reverted on purpose and all the probe's arms stayed green while t
 `tests/test_config.py` failed. The probe's own docstring says this. The suite owns that half
 and the probe owns the store half.
 
-**Nothing grades `scripts/track_probe.py` itself.** Its comparisons live in the script
-rather than in a module the suite imports, so a defect in an arm is invisible to mutation.
-The same is true of `scripts/repro_probe.py`. Moving the arithmetic into `mcr/` is the fix
-and it is not done. `scripts/registry_probe.py` is the same shape and answers it differently
-for now: every arm about this repo's code runs a control against a stand in carrying the
+**The facts the probes decide on are graded now, and the probes themselves are not.** The
+comparisons used to live in the scripts, where nothing in `tests/` could import them. They
+are in `mcr/roundtrip.py` and `mcr/canary.py`, which score 9 of 9 and 122 of 125 under a
+mutation pass. What remains ungraded is the driving and the printing, which is the right
+half to leave. `scripts/repro_probe.py` has not been moved and its arithmetic is still in
+the script. `scripts/registry_probe.py` is that shape and answers it differently: every arm about this repo's code runs a control against a stand in carrying the
 defect the arm exists to catch, and the probe fails if a control passes. That caught a bad
 arm on the first run, where the naive rollback guess and the right answer happened to agree.
+
+**`main` in `scripts/ci_local.py` is graded past its plan branch by nothing.** Seven
+mutants survive in it, all in the arithmetic that counts what ran and turns that into an
+exit code. Reaching them means executing the real job, which trains two models, so the fast
+suite cannot carry it. The plan branch is driven and the executor underneath it scores 25 of
+34. The gap is the wrapper, and it is the thinnest code in the file.
 
 **The holdout AUC of 0.676 is modest and that is the corpus, not the optimiser.** The noise
 term is 0.9 in log odds and nine of the twelve features are damped to near zero weight.

@@ -17,8 +17,8 @@ with the registry. It is reversed below, on a measurement.
 
 ## What was measured
 
-mlflow 3.16.0, sqlite backend, on this machine today. Everything here is reproducible with
-`python3 scripts/registry_probe.py`.
+mlflow 3.16.0, sqlite backend, re-measured unchanged on 3.17.1. Everything here is
+reproducible with `python3 scripts/registry_probe.py`.
 
 ```
 stage transition, nothing passed that it does not require   versions in Production: [1, 2]
@@ -57,6 +57,31 @@ member. A version that no alias points at is already in no stage and does not ne
 for it.
 
 `transition_model_version_stage` is not used anywhere in this project.
+
+## Which writes leave a trace, measured rather than assumed
+
+The cost section below says an alias move leaves no trace. That is right and it is narrower
+than the useful fact. Five registry writes were pointed at one version and each one was
+checked for whether it moved `last_updated_timestamp`.
+
+```
+set_registered_model_alias onto the version     no trace
+the alias moved off it onto another version     no trace
+set_model_version_tag on the version            no trace
+transition_model_version_stage on the version   last_updated_timestamp moves
+update_model_version description                last_updated_timestamp moves
+```
+
+Two things follow. A reader cannot use `last_updated_timestamp` to detect that an alias
+moved, which is the reason the transition log in this module exists. And a version tag is
+just as silent, so the plan this decision reversed would have been invisible in the same way
+on top of the exclusivity problem already recorded above. Only the deprecated stage API
+leaves a mark, and it is the one thing here nothing should be built on.
+
+This was measured once in a run that had already written a stage onto the same version, and
+it reported the alias claim as broken. It is not. The stage write had moved the timestamp.
+A measurement that disagrees with a record gets its own input checked before the record is
+corrected.
 
 ## The cost, which is most of this module
 

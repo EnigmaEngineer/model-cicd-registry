@@ -20,6 +20,7 @@ MODULES = [
     "tests.test_data",
     "tests.test_model",
     "tests.test_artifact",
+    "tests.test_roundtrip",
     "tests.test_train",
     "tests.test_admission",
     "tests.test_attest",

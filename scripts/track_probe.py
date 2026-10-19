@@ -13,6 +13,12 @@ Eight arms. Four are the round trip and four are controls, because a round trip 
 its own passes against a store that records nothing and a rebuild path that quietly fills
 in defaults.
 
+The facts each arm decides on are in `mcr.roundtrip`. They take dictionaries rather than a
+client, so they carry no dependency on MLflow and the fast suite grades them. Both controls
+are built there too, because a control this file assembled inline was a control nothing
+checked, and each of them has a rule in it: the short mapping has to be short by exactly
+one key, and the bent one has to hold a value that really moved.
+
 What this script cannot see, stated here rather than discovered later. Every arm loads a
 config off disk and pushes it through the store, and MLflow hands every value back as a
 string, so the rebuild only ever exercises the string branch of `config.coerce`. The
@@ -33,6 +39,7 @@ from dataclasses import replace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from mcr import roundtrip  # noqa: E402
 from mcr import tracking  # noqa: E402
 from mcr import train as train_mod  # noqa: E402
 from mcr.config import ConfigError, load  # noqa: E402
@@ -96,11 +103,11 @@ def main(argv=None) -> int:
     # Metrics are doubles in the sqlite backend and they come back exact. Worth an arm
     # because the two configs this repo ships differ on holdout log loss by 1.806e-11, so a
     # store that rounded on the way in would leave the gate comparing equal numbers.
-    exact = {k: v for k, v in result.metrics.items() if got.metrics.get(k) != v}
+    moved = roundtrip.inexact_metrics(result.metrics, got.metrics)
     ok &= _line(
         "metrics round trip exactly",
-        not exact,
-        "{} metrics, {} inexact".format(len(result.metrics), len(exact)),
+        not moved,
+        "{} metrics, {} inexact".format(len(result.metrics), len(moved)),
     )
 
     # The one invariant holding this boundary together. It is here because of what happened
@@ -108,7 +115,7 @@ def main(argv=None) -> int:
     # MLflow hands back strings and nothing else, so `config_from_params` only ever reaches
     # the string branch of `coerce`. If a value ever arrived already typed, the rebuild would
     # take a different branch and the fingerprint would start depending on which one.
-    types = sorted({type(v).__name__ for v in tracking.params_for(cfg).values()})
+    types = roundtrip.value_types(tracking.params_for(cfg))
     ok &= _line(
         "every param crosses as a string",
         types == ["str"],
@@ -117,8 +124,9 @@ def main(argv=None) -> int:
 
     # Control one. A store that dropped a param would still pass every arm above as long
     # as the rebuild filled the gap from a default.
-    thin = dict(tracking.params_for(cfg))
-    dropped = thin.pop("model.epochs")
+    full = tracking.params_for(cfg)
+    dropped = full["model.epochs"]
+    thin = roundtrip.without(full, "model.epochs")
     try:
         tracking.config_from_params(thin)
         ok &= _line("control: a missing param is refused", False, "accepted it")
@@ -129,8 +137,7 @@ def main(argv=None) -> int:
 
     # Control two. The params have to carry the numbers rather than the shape. Move one
     # value and the rebuilt config must stop matching.
-    bent = dict(tracking.params_for(cfg))
-    bent["model.epochs"] = str(int(dropped) + 1)
+    bent = roundtrip.bend(full, "model.epochs", roundtrip.bumped(dropped))
     ok &= _line(
         "control: a changed param changes the fit",
         tracking.config_from_params(bent).fingerprint() != cfg.fingerprint(),
@@ -152,8 +159,7 @@ def main(argv=None) -> int:
     # Control four. A param the store hands back is a string, and the rebuild leans on the
     # config loader to put the type back. If a junk string were accepted the fingerprint
     # would be a hash of whatever the store happened to contain.
-    junk = dict(tracking.params_for(cfg))
-    junk["data.noise"] = "nine"
+    junk = roundtrip.bend(full, "data.noise", "nine")
     try:
         tracking.config_from_params(junk)
         ok &= _line("control: junk param value is refused", False, "accepted 'nine'")

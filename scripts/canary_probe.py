@@ -21,12 +21,17 @@ result has something to be read against.
 EVERY NUMBER IS MEASURED ON A REPLAY OF A GENERATED HOLDOUT. There is no serving path in
 this project and there are no users. The arithmetic of splitting a sample is real. The
 loss values are a fact about a generator.
+
+The rules this script decides on are in `mcr.canary` and not here. The share bound, the
+width ratio, the answer key, the scoring and the trivial floor all used to be expressions
+in this file, and nothing in the suite imports a script, so a mutant could break any of
+them and the pass would read as coverage. This file drives and prints. It no longer holds a
+rule anything is graded against.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 from dataclasses import replace
@@ -75,10 +80,7 @@ def section_router(bad):
         got = float(mask.mean())
         print("  {:>8.2f} {:>10.4f} {:>10d} {:>+12.4f}".format(
             f, got, int(mask.sum()), got - f))
-        # A hash router's share is a binomial draw around the target, so three standard
-        # errors is the bound worth asserting rather than exact equality.
-        se = math.sqrt(f * (1.0 - f) / len(keys))
-        if abs(got - f) > 3.0 * se:
+        if not canary_mod.share_within_bound(f, got, len(keys)):
             _fail(bad, "router at {} achieved {} which is beyond three standard errors".format(f, got))
 
     print("")
@@ -168,12 +170,11 @@ def section_cost(bad, trials):
         _, l5, h5 = canary_mod.split_interval(losses[mask], base_losses[~mask])
         mask50 = canary_mod.Router(fraction=0.50).assign(canary_mod.replay_keys(len(y)))
         _, l50, h50 = canary_mod.split_interval(losses[mask50], base_losses[~mask50])
-        if paired_w <= 0.0:
-            _fail(bad, "epochs={} gave a paired width of {}, which cannot be divided by".format(
-                ep, paired_w))
+        try:
+            ratio = canary_mod.width_ratio(h5 - l5, paired_w)
+        except canary_mod.CanaryError as exc:
+            _fail(bad, "epochs={}: {}".format(ep, exc))
             continue
-        # The ratio is computed from the two figures beside it rather than written down.
-        ratio = (h5 - l5) / paired_w
         widths[ep] = {"paired": paired_w, "split5": h5 - l5, "split50": h50 - l50,
                       "ratio": ratio, "diff": float(d.mean())}
         print("  {:>8} {:>+14.4e} {:>10.6f} {:>13.4e} {:>13.4e} {:>9.1f}".format(
@@ -207,15 +208,14 @@ def section_cost(bad, trials):
         "epochs", "true diff", "paired verdict", "split at 5%"))
     for ep, losses, _ in cands:
         d = losses - base_losses
-        lo, hi = gate.paired_interval(d)
-        pv = canary_mod._verdict_from(float(d.mean()), lo, hi)[0]
+        pv = canary_mod.verdict_for_diff(d)
         rng = np.random.default_rng(1234)
-        counts = {canary_mod.PROMOTE: 0, canary_mod.ROLLBACK: 0, canary_mod.HOLD: 0}
         k = int(round(len(y) * 0.05))
+        drawn = []
         for _ in range(trials):
             idx = rng.permutation(len(y))
-            v, _w = _split_verdict(losses[idx[:k]], base_losses[idx[k:]])
-            counts[v] += 1
+            drawn.append(_split_verdict(losses[idx[:k]], base_losses[idx[k:]])[0])
+        counts = canary_mod.direction_counts(drawn)
         print("  {:>8} {:>+14.4e} {:>16} {:>10} promote {:>4} rollback {:>4} hold".format(
             ep, float(d.mean()), pv,
             counts[canary_mod.PROMOTE], counts[canary_mod.ROLLBACK], counts[canary_mod.HOLD]))
@@ -248,16 +248,18 @@ def section_floor(bad):
     # The answer key. A model that is worse on the paired comparison should be rolled
     # back, one that cannot be separated should be held. Written from the paired
     # comparison because that is the one with the resolution to have an opinion.
-    truth = []
-    for ep, losses, _ in cands:
-        d = losses - base_losses
-        lo, hi = gate.paired_interval(d)
-        truth.append((ep, canary_mod._verdict_from(float(d.mean()), lo, hi)[0]))
+    truth = [(ep, canary_mod.verdict_for_diff(losses - base_losses))
+             for ep, losses, _ in cands]
 
     keys = canary_mod.replay_keys(len(y))
 
+    key = [want for _ep, want in truth]
+
+    def answers(fn):
+        return [fn(ep, losses) for (ep, _want), (_, losses, _h) in zip(truth, cands)]
+
     def score_strategy(fn):
-        return sum(1 for (ep, want), (_, losses, _h) in zip(truth, cands) if fn(ep, losses) == want)
+        return canary_mod.score_against_key(key, answers(fn))
 
     always = {
         "promote everything": lambda ep, l: canary_mod.PROMOTE,
@@ -296,8 +298,12 @@ def section_floor(bad):
         len(truth)))
     print("  deliberately not quoted in the README, because a board graded against a rule")
     print("  I chose is not evidence. The table above it is, and that one is published.")
-    best_trivial = max(scores[k] for k in always)
-    if scores["split at 5%"] > best_trivial:
+    floor = canary_mod.best_trivial_score(key)
+    if floor != max(scores[k] for k in always):
+        _fail(bad, "the floor derived from the key is {} and the three trivial rows scored "
+                   "{}, so the key and the board disagree".format(
+                       floor, max(scores[k] for k in always)))
+    if canary_mod.beats_every_trivial(key, answers(split_at(0.05))):
         print("  On this run the split beat every trivial answer, which it does not always do.")
 
 

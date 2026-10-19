@@ -492,3 +492,130 @@ def report_lines(result: CanaryResult) -> List[str]:
                 "             the paired comparison on the same models says {}".format(sv)
             )
     return out
+
+
+# What the canary probe decides on.
+#
+# Everything below used to be an expression inside scripts/canary_probe.py. The probe holds
+# thirteen arms and every comparison this project publishes about splitting traffic, and
+# nothing in the suite imports a script, so none of it could be reached by a mutation pass.
+# The probe graded the router and the intervals, and nothing graded the probe.
+#
+# Moving the arithmetic here is the whole change. The probe still drives and still prints.
+# These functions carry the rules, which means a mutant can break one and a check can say so.
+
+
+def share_error_bound(fraction: float, n: int, sds: float = 3.0) -> float:
+    """How far a hash router's achieved share may sit from its target before it is wrong.
+
+    A router assigns each key independently, so the share it achieves over n keys is a
+    binomial draw around the target and the right bound is a multiple of its standard
+    error. Asserting exact equality would fail on a correct router and asserting nothing
+    would pass on a broken one.
+
+    Three standard errors by default. At a 1 percent target over 20,000 keys that is about
+    0.21 percentage points, so the bound is tight enough to catch a router whose share is
+    wrong and loose enough to survive the draw.
+    """
+    if not 0.0 < fraction < 1.0:
+        raise CanaryError("fraction must be strictly between 0 and 1, got {}".format(fraction))
+    # Two rather than one, matching `split_interval` and `verdict_for_diff`. A standard
+    # error over a single key is a real number and it is not a bound on anything, because
+    # the only shares one key can produce are zero and one. A mutation pass moved this to
+    # two and nothing failed, which is how the inconsistency was found.
+    if n < 2:
+        raise CanaryError("cannot bound a share measured over {} keys".format(n))
+    if sds <= 0.0:
+        raise CanaryError("a bound of {} standard errors admits nothing".format(sds))
+    return sds * math.sqrt(fraction * (1.0 - fraction) / n)
+
+
+def share_within_bound(
+    fraction: float, achieved: float, n: int, sds: float = 3.0
+) -> bool:
+    """Whether an achieved share sits inside the bound above."""
+    return abs(achieved - fraction) <= share_error_bound(fraction, n, sds)
+
+
+def width_ratio(split_width: float, paired_width: float) -> float:
+    """How many times wider the split interval is than the paired one.
+
+    The number the cost table is read on. It refuses a non positive paired width rather
+    than dividing by it, which is not a theoretical guard. A candidate that reproduces the
+    incumbent exactly has a paired interval of zero width, and that candidate was in the
+    probe's first list.
+    """
+    if paired_width <= 0.0:
+        raise CanaryError(
+            "a paired width of {} cannot be divided by, so the two models are the same "
+            "bytes or the interval collapsed".format(paired_width)
+        )
+    if split_width <= 0.0:
+        raise CanaryError("a split width of {} is not a width".format(split_width))
+    return split_width / paired_width
+
+
+def verdict_for_diff(diff: np.ndarray, confidence: float = CONFIDENCE) -> str:
+    """The paired verdict on a per row difference.
+
+    This is the answer key rule. The key is written from the paired comparison because that
+    is the comparison with the resolution to have an opinion, and the fact that it is also
+    one of the strategies being scored is the cost named in docs/adr-0005.
+
+    It delegates to the gate's interval and to `_verdict_from`, so there is one definition
+    of the paired comparison and one definition of how an interval is read.
+    """
+    diff = np.asarray(diff, dtype=np.float64)
+    if len(diff) < 2:
+        raise CanaryError("cannot build a paired interval on {} rows".format(len(diff)))
+    lo, hi = gate.paired_interval(diff, confidence=confidence)
+    return _verdict_from(float(np.mean(diff)), lo, hi)[0]
+
+
+def score_against_key(key: Sequence[str], verdicts: Sequence[str]) -> int:
+    """How many of a strategy's verdicts match the answer key.
+
+    Refuses a length mismatch. A scorer that zipped a short list against a long one would
+    silently score only the overlap, and the strategy with the fewest answers would win.
+    """
+    if len(key) != len(verdicts):
+        raise CanaryError(
+            "the key has {} cases and the strategy answered {}".format(len(key), len(verdicts))
+        )
+    if not key:
+        raise CanaryError("cannot score against an empty key")
+    return sum(1 for want, got in zip(key, verdicts) if want == got)
+
+
+def best_trivial_score(key: Sequence[str]) -> int:
+    """The best score any answer that ignores the data can reach on this key.
+
+    Derived from the key rather than from a list of strategies beside it. A floor written
+    as three named functions is a floor that stops being right the day a fourth verdict is
+    added, and this project has four. The floor is what the split has to beat before the
+    board says anything at all.
+    """
+    if not key:
+        raise CanaryError("cannot floor an empty key")
+    return max(score_against_key(key, [v] * len(key)) for v in (PROMOTE, ROLLBACK, HOLD))
+
+
+def beats_every_trivial(key: Sequence[str], verdicts: Sequence[str]) -> bool:
+    """Whether a strategy scored strictly better than the best answer that ignores the data."""
+    return score_against_key(key, verdicts) > best_trivial_score(key)
+
+
+def direction_counts(verdicts: Sequence[str]) -> Dict[str, int]:
+    """Tally verdicts over many draws of the split, and refuse one it does not know.
+
+    The three keys are always present, so a count of zero is reported rather than missing.
+    A caller reading `counts[PROMOTE]` to find out how often the split promoted a model it
+    should not have would otherwise get a KeyError on exactly the run where the answer is
+    the interesting one, which is the run where it never happened.
+    """
+    counts = {PROMOTE: 0, ROLLBACK: 0, HOLD: 0}
+    for verdict in verdicts:
+        if verdict not in counts:
+            raise CanaryError("{!r} is not a verdict this tally covers".format(verdict))
+        counts[verdict] += 1
+    return counts

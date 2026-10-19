@@ -813,3 +813,210 @@ def check_the_cli_report_tags_carry_both_intervals():
     # Round trip, so a tag holding a truncated float is caught here rather than by a
     # reader six weeks later.
     assert eval(tags["canary.split"]) == result.split
+
+
+# The arithmetic the probe decides on.
+#
+# These rules lived in scripts/canary_probe.py and nothing in the suite imports a script, so
+# a mutant could break any of them and the pass would call it coverage. Each one is checked
+# on a case where it holds and a case where it does not, because the probe only ever drives
+# the first kind and a rule checked one way round passes against its own inversion.
+
+
+def check_the_share_bound_is_three_standard_errors_of_a_binomial_draw():
+    got = canary.share_error_bound(0.05, 20000)
+    want = 3.0 * math.sqrt(0.05 * 0.95 / 20000)
+    assert abs(got - want) < 1e-18, (got, want)
+    # It has to shrink with more keys, otherwise a router measured over a long replay is
+    # held to the same loose bound as one measured over a short one.
+    assert canary.share_error_bound(0.05, 80000) < got
+
+
+def check_the_share_bound_is_widest_at_an_even_split():
+    even = canary.share_error_bound(0.50, 10000)
+    for f in (0.01, 0.05, 0.25, 0.75, 0.99):
+        assert canary.share_error_bound(f, 10000) < even, f
+
+
+def check_a_share_inside_the_bound_passes_and_one_outside_it_does_not():
+    bound = canary.share_error_bound(0.05, 20000)
+    assert canary.share_within_bound(0.05, 0.05 + 0.5 * bound, 20000)
+    assert canary.share_within_bound(0.05, 0.05 - 0.5 * bound, 20000)
+    assert not canary.share_within_bound(0.05, 0.05 + 2.0 * bound, 20000)
+    assert not canary.share_within_bound(0.05, 0.05 - 2.0 * bound, 20000)
+    # The boundary itself, which is the case a comparison that lost its equals passes
+    # every other assertion here. Inclusive on purpose. A share sitting exactly three
+    # standard errors out is inside the bound this function names.
+    #
+    # Landing exactly on it is not free. At 20,000 keys the bound is small enough that
+    # `fraction + bound` does not subtract back to `bound`, so the assertion below would
+    # be testing whichever side of the boundary the rounding happened to fall. A wide
+    # bound over two keys is exact, and the precondition is asserted rather than assumed,
+    # so this check cannot quietly stop testing the boundary.
+    wide = canary.share_error_bound(0.01, 2)
+    on_bound = 0.01 + wide
+    assert abs(on_bound - 0.01) == wide, "this fixture no longer lands on the boundary"
+    assert canary.share_within_bound(0.01, on_bound, 2)
+    assert not canary.share_within_bound(0.05, 0.05 + bound * 1.0000001, 20000)
+
+
+def check_the_share_bound_refuses_an_impossible_target_or_an_empty_replay():
+    for bad in (0.0, 1.0, -0.1, 1.4):
+        try:
+            canary.share_error_bound(bad, 100)
+        except canary.CanaryError:
+            pass
+        else:
+            raise AssertionError("fraction {} was bounded rather than refused".format(bad))
+    # The boundary, not just a value well inside the refusal. One key can only ever
+    # produce a share of zero or one, so a standard error over it bounds nothing. Two is
+    # where the quantity starts to exist, and it matches the guard on every other interval
+    # in this module.
+    for n in (0, -5, 1):
+        try:
+            canary.share_error_bound(0.05, n)
+        except canary.CanaryError as exc:
+            assert "measured over {} keys".format(n) in str(exc), str(exc)
+        else:
+            raise AssertionError("a share over {} keys was bounded".format(n))
+    assert canary.share_error_bound(0.05, 2) > 0.0
+    try:
+        canary.share_error_bound(0.05, 100, sds=0.0)
+    except canary.CanaryError:
+        pass
+    else:
+        raise AssertionError("a bound of zero standard errors admits nothing and was allowed")
+
+
+def check_the_real_router_sits_inside_its_own_bound_at_every_shipped_fraction():
+    keys = canary.replay_keys(20000)
+    for f in (0.01, 0.05, 0.10, 0.25, 0.50):
+        achieved = float(canary.Router(fraction=f).assign(keys).mean())
+        assert canary.share_within_bound(f, achieved, len(keys)), (f, achieved)
+
+
+def check_the_width_ratio_is_the_two_widths_and_not_a_written_number():
+    assert canary.width_ratio(2.0e-3, 1.0e-4) == 20.0
+    assert canary.width_ratio(5.0, 5.0) == 1.0
+
+
+def check_the_width_ratio_refuses_a_collapsed_paired_interval():
+    # A candidate reproducing the incumbent exactly has a paired width of zero. One was in
+    # the probe's first candidate list, which is why this refusal exists rather than a
+    # comment saying it cannot happen.
+    for bad in (0.0, -1.0e-9):
+        try:
+            canary.width_ratio(1.0e-3, bad)
+        except canary.CanaryError as exc:
+            assert "cannot be divided by" in str(exc), str(exc)
+        else:
+            raise AssertionError("a paired width of {} was divided by".format(bad))
+    try:
+        canary.width_ratio(0.0, 1.0e-3)
+    except canary.CanaryError as exc:
+        assert "not a width" in str(exc), str(exc)
+    else:
+        raise AssertionError("a split width of zero was accepted")
+
+
+def check_the_answer_key_rule_is_the_same_rule_the_report_and_the_cli_read():
+    # _verdict_from is read four ways now. This pins that verdict_for_diff is not a fourth
+    # reading of the interval but the same one.
+    worse = np.full(500, 1.0e-2)
+    better = np.full(500, -1.0e-2)
+    flat = np.concatenate([np.full(250, 1.0e-6), np.full(250, -1.0e-6)])
+    assert canary.verdict_for_diff(worse) == canary.ROLLBACK
+    assert canary.verdict_for_diff(better) == canary.PROMOTE
+    assert canary.verdict_for_diff(flat) == canary.HOLD
+    for arr in (worse, better, flat):
+        lo, hi = gate.paired_interval(np.asarray(arr, dtype=np.float64))
+        assert canary.verdict_for_diff(arr) == canary._verdict_from(
+            float(np.mean(arr)), lo, hi
+        )[0]
+
+
+def check_the_answer_key_rule_refuses_a_single_row_and_admits_two():
+    for arr in (np.array([1.0]), np.array([])):
+        try:
+            canary.verdict_for_diff(arr)
+        except canary.CanaryError as exc:
+            assert "paired interval" in str(exc), str(exc)
+        else:
+            raise AssertionError("an interval was built on {} rows".format(len(arr)))
+    # Two rows is the boundary and it is allowed. A guard that refused it would make the
+    # answer key silently unavailable on the smallest case the key can have, and a guard
+    # checked only on zero and one rows passes whether the boundary is two or three.
+    assert canary.verdict_for_diff(np.array([1.0, 1.0])) == canary.ROLLBACK
+
+
+def check_scoring_counts_the_matches_and_nothing_else():
+    key = [canary.ROLLBACK, canary.ROLLBACK, canary.HOLD, canary.PROMOTE]
+    assert canary.score_against_key(key, list(key)) == 4
+    assert canary.score_against_key(key, [canary.HOLD] * 4) == 1
+    assert canary.score_against_key(key, [canary.REFUSE] * 4) == 0
+
+
+def check_scoring_refuses_a_strategy_that_answered_a_different_number_of_cases():
+    key = [canary.ROLLBACK, canary.HOLD, canary.PROMOTE]
+    # A scorer zipping a short list against a long one scores the overlap and the strategy
+    # with the fewest answers wins. That is the defect this refusal exists for.
+    for answers in ([canary.ROLLBACK], [canary.ROLLBACK] * 5):
+        try:
+            canary.score_against_key(key, answers)
+        except canary.CanaryError as exc:
+            assert "answered" in str(exc), str(exc)
+        else:
+            raise AssertionError("{} answers were scored against 3 cases".format(len(answers)))
+    try:
+        canary.score_against_key([], [])
+    except canary.CanaryError:
+        pass
+    else:
+        raise AssertionError("an empty key was scored")
+
+
+def check_the_trivial_floor_is_the_commonest_verdict_in_the_key():
+    # Lopsided on purpose. A key split evenly between two verdicts has the same floor
+    # whichever one a broken max picked, so an even key cannot test this.
+    key = [canary.ROLLBACK] * 4 + [canary.HOLD, canary.PROMOTE]
+    assert canary.best_trivial_score(key) == 4
+    assert canary.best_trivial_score([canary.HOLD] * 6) == 6
+    assert canary.best_trivial_score([canary.PROMOTE, canary.ROLLBACK]) == 1
+
+
+def check_the_floor_ignores_a_verdict_no_trivial_answer_can_give():
+    # REFUSE is a verdict and no answer that ignores the data gives it, so a case the key
+    # marks refused is unreachable by the floor and must not raise.
+    key = [canary.REFUSE, canary.REFUSE, canary.ROLLBACK]
+    assert canary.best_trivial_score(key) == 1
+
+
+def check_beating_the_floor_is_strict():
+    key = [canary.ROLLBACK] * 4 + [canary.HOLD, canary.PROMOTE]
+    assert canary.beats_every_trivial(key, list(key))
+    # Matching the floor is not beating it. A strategy that scores exactly what rolling
+    # everything back scores has shown nothing, and this is the comparison the board is read
+    # on.
+    assert not canary.beats_every_trivial(key, [canary.ROLLBACK] * 6)
+    assert not canary.beats_every_trivial(key, [canary.PROMOTE] * 6)
+
+
+def check_the_direction_tally_reports_a_zero_rather_than_a_missing_key():
+    counts = canary.direction_counts([canary.ROLLBACK] * 7)
+    assert counts == {canary.PROMOTE: 0, canary.ROLLBACK: 7, canary.HOLD: 0}
+    assert canary.direction_counts([]) == {
+        canary.PROMOTE: 0,
+        canary.ROLLBACK: 0,
+        canary.HOLD: 0,
+    }
+
+
+def check_the_direction_tally_refuses_a_verdict_it_does_not_cover():
+    # REFUSE is a real verdict of this module and it is not a direction. A tally that
+    # silently dropped it would report a run of refusals as a run of nothing.
+    try:
+        canary.direction_counts([canary.ROLLBACK, canary.REFUSE])
+    except canary.CanaryError as exc:
+        assert "not a verdict this tally covers" in str(exc), str(exc)
+    else:
+        raise AssertionError("refuse was tallied as a direction")

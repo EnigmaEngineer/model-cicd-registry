@@ -240,3 +240,200 @@ def check_the_checkout_stand_in_lands_exactly_the_committed_tree():
         assert os.path.isdir(os.path.join(destination, ".git")), "no repository in the workspace"
     finally:
         shutil.rmtree(os.path.dirname(destination), ignore_errors=True)
+
+
+# Driving the executor itself.
+#
+# The module docstring above says nothing here trains a model, and that is still true. It
+# also meant, until now, that `execute` was graded by nothing at all. A mutation pass over
+# this script found nine survivors inside `execute`, `main` and `build_parser`, and the
+# reason was not a missing assertion. No check had ever called them.
+#
+# What follows drives `execute` against a workflow of `echo` commands. The step sequencing,
+# the output capture and the failure rule are the parts worth grading, and none of them need
+# the real job. The real job is what `scripts/ci_local.py` is for.
+
+ECHO_JOB = "\n".join([
+    "name: echo",
+    "env:",
+    "  GREETING: hello",
+    "jobs:",
+    "  tiny:",
+    "    runs-on: ubuntu-latest",
+    "    steps:",
+    "      - uses: actions/checkout@v4",
+    "      - name: say the thing",
+    "        id: say",
+    "        run: |",
+    "          echo \"$GREETING\"",
+    "          echo 'verdict=promote' >> \"$GITHUB_OUTPUT\"",
+    "      - name: only when promoted",
+    "        if: steps.say.outputs.verdict == 'promote'",
+    "        run: echo 'took the promote path'",
+    "      - name: only when rejected",
+    "        if: steps.say.outputs.verdict == 'reject'",
+    "        run: echo 'took the reject path'",
+    "      - name: skip me",
+    "        run: echo 'should not run'",
+    "",
+])
+
+
+# One execution, read by three checks. `execute` clones the repo on every call because a
+# real checkout leaves a `.git` behind, and four clones to assert four things about one run
+# put eight seconds on a suite that is meant to run on every edit. Memoised rather than
+# module level, so collecting a single check does not pay for an execution it never reads.
+_ECHO_RUN = None
+
+
+def _echo_run():
+    global _ECHO_RUN
+    if _ECHO_RUN is None:
+        import io
+        import tempfile
+        doc = ci.read_workflow(ECHO_JOB)
+        stream = io.StringIO()
+        results = ci.execute(
+            doc, "tiny", tempfile.mkdtemp(prefix="echo-"), stream=stream, skip={"skip me"}
+        )
+        _ECHO_RUN = (results, stream.getvalue())
+    return _ECHO_RUN
+
+
+def _states(results):
+    return [(r["step"], r["state"]) for r in results]
+
+
+def check_execute_runs_the_steps_a_condition_admits_and_skips_the_rest():
+    results, text = _echo_run()
+    states = dict(_states(results))
+    assert states["say the thing"] == "ran", states
+    # The whole reason the executor exists. The second step's condition reads what the
+    # first step wrote, so this is the state one command leaves for the next.
+    assert states["only when promoted"] == "ran", states
+    assert states["only when rejected"] == "skipped", states
+    assert states["skip me"] == "skipped-by-request", states
+    assert states["actions/checkout@v4"] == "not-executable", states
+    assert "took the promote path" in text
+    assert "took the reject path" not in text
+    # The default is the committed tree. A run that copied the working tree over the clone
+    # without being asked would grade whatever is uncommitted, which is the one reading
+    # that cannot disagree with the editor.
+    assert "cloned the committed tree at" in text, text
+    assert "copied the working tree over it" not in text, text
+    # The checkout step is reported as stood in for. A report saying "no runner here"
+    # about checkout would describe a gap this does not have, because the clone above is
+    # the stand in.
+    assert "the workspace copy stands in for it" in text
+
+
+def check_execute_resolves_the_workflow_env_into_the_step_environment():
+    results, _text = _echo_run()
+    ran = [r for r in results if r["step"] == "say the thing"][0]
+    # GREETING comes from the workflow's env block and nothing else sets it, so the step
+    # echoing it is the only evidence the block reached the subprocess.
+    assert "hello" in ran["stdout"], ran["stdout"]
+
+
+def check_execute_stops_after_a_failure_and_still_runs_an_always_step():
+    import io
+    import tempfile
+    failing = ECHO_JOB.replace(
+        "      - name: skip me\n        run: echo 'should not run'\n",
+        "      - name: fall over\n        run: exit 3\n"
+        "      - name: quiet one\n        run: echo 'should not run'\n"
+        "      - name: report regardless\n        if: always()\n"
+        "        run: echo 'reported'\n",
+    )
+    doc = ci.read_workflow(failing)
+    stream = io.StringIO()
+    results = ci.execute(doc, "tiny", tempfile.mkdtemp(prefix="echo-"), stream=stream)
+    states = dict(_states(results))
+    assert states["fall over"] == "ran", states
+    assert [r for r in results if r["step"] == "fall over"][0]["code"] == 3
+    # The defect this rule exists for. A real runner skips what follows a failure and runs
+    # an always() step anyway, so a local report that broke out of the loop would be
+    # quieter than the thing it is modelling.
+    assert states["quiet one"] == "skipped-after-failure", states
+    assert states["report regardless"] == "ran", states
+    assert "reported" in stream.getvalue()
+
+
+def check_execute_reports_the_interpreter_and_the_declared_runner_separately():
+    import sys
+    _results, text = _echo_run()
+    assert sys.version.split()[0] in text
+    # A local green must not read as a badge. The declared runner is printed with a line
+    # saying it is not what ran.
+    assert "ubuntu-latest is declared and is not what this is" in text
+
+
+def check_execute_refuses_a_job_the_workflow_does_not_have():
+    import tempfile
+    doc = ci.read_workflow(ECHO_JOB)
+    try:
+        ci.execute(doc, "nosuchjob", tempfile.mkdtemp(prefix="echo-"))
+    except KeyError:
+        pass
+    except ci.WorkflowError:
+        pass
+    else:
+        raise AssertionError("a job that is not in the file was executed")
+
+
+def check_the_parser_defaults_name_the_deploy_job_and_a_real_checkout():
+    args = ci.build_parser().parse_args([])
+    assert args.job == "deploy"
+    assert args.event == "push"
+    assert args.plan_only is False
+    # from_worktree defaulting to False is what makes an unflagged run read the committed
+    # tree, which is the only reading that can disagree with the working copy.
+    assert args.from_worktree is False
+    assert args.skip == []
+    assert args.workspace is None
+    assert args.pythonpath is None
+
+
+def check_the_parser_takes_a_repeated_skip_and_the_two_tree_modes():
+    args = ci.build_parser().parse_args(
+        ["--job", "checks", "--skip", "install", "--skip", "seed",
+         "--from-worktree", "--plan-only", "--pythonpath", "/tmp/libs"]
+    )
+    assert args.job == "checks"
+    assert args.skip == ["install", "seed"]
+    assert args.from_worktree is True
+    assert args.plan_only is True
+    assert args.pythonpath == "/tmp/libs"
+
+
+def check_the_parser_refuses_an_unknown_flag():
+    import contextlib
+    import io
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            ci.build_parser().parse_args(["--not-a-flag"])
+    except SystemExit as exc:
+        assert exc.code == 2, exc.code
+        # Asserting the message and not only the status, because argparse exits 2 for an
+        # unknown flag and for a bad value of a known one.
+        assert "unrecognized arguments" in buf.getvalue(), buf.getvalue()
+    else:
+        raise AssertionError("an unknown flag was accepted")
+
+
+def check_main_plans_a_job_without_executing_it():
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = ci.main(["--plan-only", "--job", "checks"])
+    out = buf.getvalue()
+    # Exit zero, because planning is not a verdict on anything. A plan that returned a
+    # failure code would make the workflow's own dry run look like a broken job.
+    assert code == 0, code
+    assert "job checks" in out, out
+    # The plan prints the commands and runs none of them, which is what makes it safe to
+    # grade on every suite run.
+    assert "python3 tests/run_all.py" in out, out
+    assert "steps ran" not in out, out
